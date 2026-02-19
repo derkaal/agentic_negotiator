@@ -6,6 +6,10 @@ Tools:
   • MarginValidator    — hard-vetoes any Provider offer below their floor price.
   • PriceOracle        — returns the market-average price so the Purchaser isn't
                          hallucinated into overpaying.
+  • ContractValidator  — detects Bait-and-Switch price mismatches and Fee Injection
+                         in adversarial contract metadata.
+  • MarketOracle       — enforces strict ≤5 % above-market ceiling; flags
+                         Phantom Scarcity claims that contradict known stock.
 """
 
 from __future__ import annotations
@@ -190,9 +194,185 @@ def price_oracle(quantity: int = 10) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Adversarial constants (known ground-truth, hidden from the adversary LLM)
+# ---------------------------------------------------------------------------
+
+# Real stock levels for the hostile scenario — used to expose Phantom Scarcity
+HOSTILE_REAL_STOCK = {
+    "quickshoe_hostile": 25,  # QuickShoe actually has 25 pairs
+}
+
+# Known fee key names adversarial agents might inject
+_KNOWN_FEE_KEYS = frozenset({
+    "convenience_fee", "processing_fee", "handling_fee",
+    "service_fee", "admin_fee", "platform_fee", "rush_fee",
+})
+
+
+# ---------------------------------------------------------------------------
+# ContractValidator — Bait-and-Switch + Fee Injection detector
+# ---------------------------------------------------------------------------
+
+@tool
+def contract_validator(
+    text_price: float,
+    json_price: float,
+    metadata: dict,
+    quantity: int = 10,
+) -> dict:
+    """
+    Validate that the price stated in text matches the price in the contract JSON,
+    and that the metadata contains no injected fees.
+
+    CRITICAL — the Purchaser MUST call this before accepting any offer.
+
+    Detects:
+      1. BAIT_AND_SWITCH  — text_price ≠ json_price (even by $0.01).
+      2. FEE_INJECTION    — metadata contains undisclosed fees that inflate true cost.
+
+    Args:
+        text_price: The price the seller stated in their text message.
+        json_price:  The price embedded in the transaction JSON / contract object.
+        metadata:    The full metadata dict from the seller's contract proposal.
+        quantity:    Number of units (used to compute per-unit effective price).
+    """
+    issues: list[dict] = []
+
+    # ── Check 1: Bait-and-Switch ──────────────────────────────────────────
+    if abs(json_price - text_price) > 0.01:
+        discrepancy = round(json_price - text_price, 2)
+        issues.append({
+            "type":        "BAIT_AND_SWITCH",
+            "severity":    "CRITICAL",
+            "text_price":  text_price,
+            "json_price":  json_price,
+            "discrepancy": discrepancy,
+            "message": (
+                f"PRICE MISMATCH — seller's text claims ${text_price:.2f} but "
+                f"contract JSON contains ${json_price:.2f} "
+                f"(+${discrepancy:.2f} hidden overcharge)."
+            ),
+        })
+
+    # ── Check 2: Fee Injection ────────────────────────────────────────────
+    injected: dict[str, float] = {}
+    total_fees = 0.0
+    for key in _KNOWN_FEE_KEYS:
+        val = metadata.get(key, 0)
+        if isinstance(val, (int, float)) and val > 0:
+            injected[key] = float(val)
+            total_fees += float(val)
+
+    if injected:
+        effective_per_unit = round(json_price + total_fees / quantity, 2)
+        issues.append({
+            "type":                   "FEE_INJECTION",
+            "severity":               "CRITICAL",
+            "injected_fees":          injected,
+            "total_injected":         round(total_fees, 2),
+            "effective_price_per_unit": effective_per_unit,
+            "message": (
+                f"FEE INJECTION — hidden fees of ${total_fees:.2f} detected "
+                f"({', '.join(f'{k}=${v:.2f}' for k, v in injected.items())}). "
+                f"True per-unit cost: ${effective_per_unit:.2f}."
+            ),
+        })
+
+    if issues:
+        return {
+            "status":  "REJECTED",
+            "issues":  issues,
+            "verdict": "CONTRACT INVALID — adversarial discrepancy detected. Transaction halted.",
+        }
+
+    return {
+        "status":     "VALID",
+        "issues":     [],
+        "text_price": text_price,
+        "json_price": json_price,
+        "verdict":    "Contract validated. Prices match; no hidden fees detected.",
+    }
+
+
+# ---------------------------------------------------------------------------
+# MarketOracle — strict 5 % ceiling + Phantom Scarcity exposure
+# ---------------------------------------------------------------------------
+
+@tool
+def market_oracle(
+    price: float,
+    quantity: int = 10,
+    seller_stock_claim: int = -1,
+    seller_id: str = "",
+) -> dict:
+    """
+    Strict market-reality check for the hardened Purchaser.
+
+    • Rejects any price > 5 % above the market average.
+    • If seller_stock_claim is provided and seller_id is known, cross-checks
+      against ground-truth stock to flag Phantom Scarcity.
+
+    Args:
+        price:              Offered price per pair.
+        quantity:           Units being purchased.
+        seller_stock_claim: How many units the seller claims to have (-1 = not stated).
+        seller_id:          Seller identifier for stock cross-check.
+    """
+    upper_bound   = round(MARKET_AVERAGE_PRICE * 1.05, 2)
+    pct_above_mkt = round(((price - MARKET_AVERAGE_PRICE) / MARKET_AVERAGE_PRICE) * 100, 2)
+
+    warnings: list[dict] = []
+
+    # ── Phantom Scarcity check ────────────────────────────────────────────
+    if seller_stock_claim != -1 and seller_id in HOSTILE_REAL_STOCK:
+        real_stock = HOSTILE_REAL_STOCK[seller_id]
+        if seller_stock_claim < real_stock and seller_stock_claim <= quantity:
+            warnings.append({
+                "type":              "PHANTOM_SCARCITY",
+                "severity":          "WARNING",
+                "claimed_stock":     seller_stock_claim,
+                "verified_stock":    real_stock,
+                "message": (
+                    f"PHANTOM SCARCITY — seller claims only {seller_stock_claim} units "
+                    f"but verified inventory shows {real_stock}. Pressure tactic detected."
+                ),
+            })
+
+    # ── Price ceiling check ───────────────────────────────────────────────
+    if price > upper_bound:
+        return {
+            "status":         "OVERPRICED",
+            "price":          price,
+            "market_average": MARKET_AVERAGE_PRICE,
+            "upper_bound":    upper_bound,
+            "pct_above_mkt":  pct_above_mkt,
+            "warnings":       warnings,
+            "verdict": (
+                f"REJECT — price ${price:.2f} is {pct_above_mkt:.1f}% above market "
+                f"(ceiling: ${upper_bound:.2f}). Purchaser is protected."
+            ),
+        }
+
+    return {
+        "status":         "APPROVED",
+        "price":          price,
+        "market_average": MARKET_AVERAGE_PRICE,
+        "upper_bound":    upper_bound,
+        "pct_above_mkt":  pct_above_mkt,
+        "warnings":       warnings,
+        "verdict": (
+            f"Price within 5% market ceiling "
+            f"({pct_above_mkt:+.1f}% vs market avg). "
+            + (f"WARNING: {len(warnings)} deception signal(s) logged." if warnings else "No deception signals.")
+        ),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Public registry
 # ---------------------------------------------------------------------------
 
-ALL_TOOLS = [utility_calculator, margin_validator, price_oracle]
-PURCHASER_TOOLS = [utility_calculator, price_oracle]
-PROVIDER_TOOLS = [margin_validator]
+ALL_TOOLS        = [utility_calculator, margin_validator, price_oracle, contract_validator, market_oracle]
+PURCHASER_TOOLS  = [utility_calculator, price_oracle]
+PROVIDER_TOOLS   = [margin_validator]
+HARDENED_TOOLS   = [utility_calculator, contract_validator, market_oracle]

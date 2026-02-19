@@ -138,6 +138,46 @@ async def websocket_live(websocket: WebSocket, purchaser_type: str = "tough"):
 
 
 # ---------------------------------------------------------------------------
+# Hostile WebSocket — 3-round adversarial red-team simulation
+# ---------------------------------------------------------------------------
+
+@app.websocket("/ws/hostile/{purchaser_type}")
+async def websocket_hostile(websocket: WebSocket, purchaser_type: str = "tough"):
+    """
+    Runs the Hostile Negotiation War Room:
+      Round 1 — QuickShoe Bait-and-Switch  → ContractValidator BLOCKS
+      Round 2 — Fee Injection              → ContractValidator BLOCKS
+      Round 3 — Phantom Scarcity           → MarketOracle WARNS (non-blocking)
+                                             UtilityCalculator > 60  → ACCEPT
+
+    Events include deception_alert, thought[ADVERSARIAL_INTENT],
+    thought[TRICK_ATTEMPT], thought[DETECTION], thought[VETO].
+    """
+    await websocket.accept()
+    log.info("Hostile WS connected (purchaser_type=%s)", purchaser_type)
+
+    from hostile_agents import hostile_event_stream, run_hostile_negotiation
+
+    hostile_task = asyncio.create_task(run_hostile_negotiation(purchaser_type))
+
+    try:
+        async for event in hostile_event_stream():
+            await websocket.send_text(json.dumps(event))
+            if event.get("type") == "negotiation_end":
+                break
+    except WebSocketDisconnect:
+        log.info("Hostile WS client disconnected early")
+        hostile_task.cancel()
+    except Exception as exc:
+        log.error("Hostile WS error: %s", exc)
+        try:
+            await websocket.send_text(json.dumps({"type": "error", "message": str(exc)}))
+        except Exception:
+            pass
+        hostile_task.cancel()
+
+
+# ---------------------------------------------------------------------------
 # Demo data endpoint (no LLM key needed — scripted for the live demo)
 # ---------------------------------------------------------------------------
 

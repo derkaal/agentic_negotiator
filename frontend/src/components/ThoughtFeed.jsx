@@ -1,30 +1,42 @@
 /**
  * ThoughtFeed — streaming terminal showing the Agent Inner Monologue.
  *
- * Each thought entry has a tag:
- *   [STRATEGY]    — agent decides on approach  (purple)
- *   [TOOL_CALL]   — agent invokes a grounding tool (cyan)
- *   [MATH_RESULT] — tool returns structured data  (yellow)
- *   [DECISION]    — agent acts on the result       (green / red)
+ * Standard tags:
+ *   [STRATEGY]           — agent approach      (purple)
+ *   [TOOL_CALL]          — grounding tool call  (cyan)
+ *   [MATH_RESULT]        — tool result data     (yellow)
+ *   [DECISION]           — agent act            (green/red)
  *
- * The feed auto-scrolls to the latest entry.
+ * Adversarial tags (hostile mode):
+ *   [ADVERSARIAL_INTENT] — QuickShoe's attack plan        (crimson)
+ *   [TRICK_ATTEMPT]      — the deceptive offer being made (orange)
+ *   [DETECTION]          — shield catches the trick       (amber)
+ *   [VETO]               — transaction blocked            (red bold)
  */
 
 import React, { useEffect, useRef } from 'react'
 import clsx from 'clsx'
 
 const TAG_STYLES = {
-  STRATEGY:    'bg-purple-900/50 text-purple-300 border border-purple-700/50',
-  TOOL_CALL:   'bg-cyan-900/50  text-cyan-300   border border-cyan-700/50',
-  MATH_RESULT: 'bg-yellow-900/40 text-yellow-300 border border-yellow-700/50',
-  DECISION:    'bg-emerald-900/50 text-emerald-300 border border-emerald-700/50',
+  // Standard
+  STRATEGY:           'bg-purple-900/50  text-purple-300  border border-purple-700/50',
+  TOOL_CALL:          'bg-cyan-900/50    text-cyan-300    border border-cyan-700/50',
+  MATH_RESULT:        'bg-yellow-900/40  text-yellow-300  border border-yellow-700/50',
+  DECISION:           'bg-emerald-900/50 text-emerald-300 border border-emerald-700/50',
+  // Adversarial
+  ADVERSARIAL_INTENT: 'bg-red-950/80     text-red-300     border border-red-700/70',
+  TRICK_ATTEMPT:      'bg-orange-950/70  text-orange-300  border border-orange-700/60',
+  DETECTION:          'bg-amber-900/60   text-amber-300   border border-amber-600/60',
+  VETO:               'bg-red-900/80     text-red-200     border border-red-500/80',
 }
 
 const ACTOR_COLORS = {
-  PURCHASER:  'text-cyan-400',
-  PROVIDER_1: 'text-purple-400',
-  PROVIDER_2: 'text-pink-400',
-  PROVIDER_3: 'text-orange-400',
+  PURCHASER:         'text-cyan-400',
+  PROVIDER_1:        'text-purple-400',
+  PROVIDER_2:        'text-pink-400',
+  PROVIDER_3:        'text-orange-400',
+  QUICKSHOE:         'text-red-400',
+  QUICKSHOE_HOSTILE: 'text-red-400',
 }
 
 function actorColor(actor) {
@@ -33,32 +45,40 @@ function actorColor(actor) {
 
 function actorLabel(actor) {
   const map = {
-    PURCHASER:  'PURCHASER',
-    PROVIDER_1: 'NOVA KICKS',
-    PROVIDER_2: 'SOLEMASTER',
-    PROVIDER_3: 'QUICKSHOE',
+    PURCHASER:         'PURCHASER',
+    PROVIDER_1:        'NOVA KICKS',
+    PROVIDER_2:        'SOLEMASTER',
+    PROVIDER_3:        'QUICKSHOE',
+    QUICKSHOE:         '☠ QUICKSHOE',
+    QUICKSHOE_HOSTILE: '☠ QUICKSHOE',
   }
   return map[actor] ?? actor
 }
 
+const ADVERSARIAL_TAGS = new Set([
+  'ADVERSARIAL_INTENT', 'TRICK_ATTEMPT', 'DETECTION', 'VETO',
+])
+
 function ThoughtEntry({ thought }) {
   const isJson =
     thought.tag === 'MATH_RESULT' && thought.content.trim().startsWith('{')
+  const isAdversarial = ADVERSARIAL_TAGS.has(thought.tag)
 
   let displayContent = thought.content
   if (isJson) {
     try {
       displayContent = JSON.stringify(JSON.parse(thought.content), null, 2)
-    } catch {
-      /* keep as-is */
-    }
+    } catch { /* keep as-is */ }
   }
 
-  const isVeto = thought.content.includes('VETO')
-  const isAccept = thought.content.startsWith('ACCEPT')
+  const isVeto   = thought.tag === 'VETO' || thought.content.includes('HALTED')
+  const isAccept = thought.content.startsWith('ACCEPT') || thought.content.includes('DEAL CLOSED')
 
   return (
-    <div className="animate-fade-in border-b border-war-border/40 pb-3 mb-3 last:border-0">
+    <div className={clsx(
+      'animate-fade-in border-b pb-3 mb-3 last:border-0',
+      isAdversarial ? 'border-red-900/50' : 'border-war-border/40',
+    )}>
       {/* Header row */}
       <div className="flex items-center gap-2 mb-1.5 flex-wrap">
         <span className={clsx('text-xs font-bold', actorColor(thought.actor))}>
@@ -74,7 +94,7 @@ function ThoughtEntry({ thought }) {
         </span>
         {isVeto && (
           <span className="text-xs font-bold text-war-red animate-pulse">
-            ⚠ VETO
+            🚨 BLOCKED
           </span>
         )}
         {isAccept && (
@@ -84,20 +104,24 @@ function ThoughtEntry({ thought }) {
 
       {/* Content */}
       {isJson ? (
-        <pre className="text-xs text-gray-400 bg-black/30 rounded p-2 overflow-x-auto whitespace-pre-wrap leading-relaxed border border-war-border/50">
+        <pre className={clsx(
+          'text-xs rounded p-2 overflow-x-auto whitespace-pre-wrap leading-relaxed border',
+          isAdversarial
+            ? 'text-red-300 bg-red-950/30 border-red-800/50'
+            : 'text-gray-400 bg-black/30 border-war-border/50',
+        )}>
           {displayContent}
         </pre>
       ) : (
-        <p
-          className={clsx(
-            'text-xs leading-relaxed font-mono',
-            isVeto
-              ? 'text-red-300'
-              : isAccept
-              ? 'text-emerald-300'
-              : 'text-gray-300'
-          )}
-        >
+        <p className={clsx(
+          'text-xs leading-relaxed font-mono',
+          thought.tag === 'ADVERSARIAL_INTENT' ? 'text-red-300 italic' :
+          thought.tag === 'TRICK_ATTEMPT'      ? 'text-orange-300' :
+          thought.tag === 'DETECTION'          ? 'text-amber-300 font-semibold' :
+          isVeto                               ? 'text-red-200 font-bold' :
+          isAccept                             ? 'text-emerald-300' :
+                                                 'text-gray-300'
+        )}>
           {displayContent}
         </p>
       )}

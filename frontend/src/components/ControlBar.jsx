@@ -63,23 +63,25 @@ export default function ControlBar({
           )}
         </div>
 
-        {/* Demo / Live mode toggle */}
+        {/* Demo / Live / Hostile mode toggle */}
         <div className="flex rounded-lg overflow-hidden border border-war-border">
-          {['demo', 'live'].map((m) => (
+          {[
+            { id: 'demo',    label: '🎬 Demo',    activeClass: 'bg-war-purple text-white' },
+            { id: 'live',    label: '🤖 Live',    activeClass: 'bg-war-green  text-black' },
+            { id: 'hostile', label: '☠ Hostile', activeClass: 'bg-war-red    text-white' },
+          ].map(({ id, label, activeClass }) => (
             <button
-              key={m}
+              key={id}
               disabled={isRunning}
-              onClick={() => !isRunning && onModeChange(m)}
+              onClick={() => !isRunning && onModeChange(id)}
               className={clsx(
-                'px-4 py-2 text-xs font-bold uppercase tracking-wider transition-colors',
-                mode === m && !isRunning
-                  ? m === 'live'
-                    ? 'bg-war-green text-black'
-                    : 'bg-war-purple text-white'
+                'px-3 py-2 text-xs font-bold uppercase tracking-wider transition-colors',
+                mode === id && !isRunning
+                  ? activeClass
                   : 'bg-war-panel text-gray-400 hover:bg-war-border disabled:cursor-not-allowed disabled:opacity-50'
               )}
             >
-              {m === 'demo' ? '🎬 Demo' : '🤖 Live LLM'}
+              {label}
             </button>
           ))}
         </div>
@@ -111,12 +113,21 @@ export default function ControlBar({
             'px-5 py-2 rounded-lg text-xs font-bold uppercase tracking-wider transition-all',
             isRunning
               ? 'bg-gray-700 text-gray-500 cursor-not-allowed'
+              : mode === 'hostile'
+              ? 'bg-war-red text-white hover:bg-red-600 active:scale-95'
               : mode === 'live'
               ? 'bg-war-green text-black hover:bg-emerald-400 active:scale-95'
               : 'bg-war-purple text-white hover:bg-purple-500 active:scale-95'
           )}
         >
-          {isRunning ? 'Running…' : mode === 'live' ? '▶ Run Live' : '▶ Play Demo'}
+          {isRunning
+            ? 'Running…'
+            : mode === 'hostile'
+            ? '☠ Launch Attack'
+            : mode === 'live'
+            ? '▶ Run Live'
+            : '▶ Play Demo'
+          }
         </button>
 
         <button
