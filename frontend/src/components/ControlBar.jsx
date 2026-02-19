@@ -23,11 +23,13 @@ const STATUS_LABELS = {
 
 export default function ControlBar({
   status,
+  mode,
   purchaserType,
   currentRound,
   maxRounds = 6,
   onStart,
   onReset,
+  onModeChange,
 }) {
   const isRunning = status === 'running' || status === 'connecting'
 
@@ -43,7 +45,7 @@ export default function ControlBar({
             <h1 className="text-white font-black text-sm tracking-widest uppercase">
               Negotiation War Room
             </h1>
-            <p className="text-gray-600 text-xs">Grounded Agents Demo</p>
+            <p className="text-gray-600 text-xs">Grounded Agents — Claude Haiku 4.5</p>
           </div>
         </div>
 
@@ -61,13 +63,34 @@ export default function ControlBar({
           )}
         </div>
 
+        {/* Demo / Live mode toggle */}
+        <div className="flex rounded-lg overflow-hidden border border-war-border">
+          {['demo', 'live'].map((m) => (
+            <button
+              key={m}
+              disabled={isRunning}
+              onClick={() => !isRunning && onModeChange(m)}
+              className={clsx(
+                'px-4 py-2 text-xs font-bold uppercase tracking-wider transition-colors',
+                mode === m && !isRunning
+                  ? m === 'live'
+                    ? 'bg-war-green text-black'
+                    : 'bg-war-purple text-white'
+                  : 'bg-war-panel text-gray-400 hover:bg-war-border disabled:cursor-not-allowed disabled:opacity-50'
+              )}
+            >
+              {m === 'demo' ? '🎬 Demo' : '🤖 Live LLM'}
+            </button>
+          ))}
+        </div>
+
         {/* Purchaser type toggle */}
         <div className="flex rounded-lg overflow-hidden border border-war-border">
           {['tough', 'emergency'].map((type) => (
             <button
               key={type}
               disabled={isRunning}
-              onClick={() => !isRunning && onStart(type)}
+              onClick={() => !isRunning && onStart(type, mode)}
               className={clsx(
                 'px-4 py-2 text-xs font-bold uppercase tracking-wider transition-colors',
                 purchaserType === type && !isRunning
@@ -82,16 +105,18 @@ export default function ControlBar({
 
         {/* Start / Reset buttons */}
         <button
-          onClick={() => onStart(purchaserType)}
+          onClick={() => onStart(purchaserType, mode)}
           disabled={isRunning}
           className={clsx(
             'px-5 py-2 rounded-lg text-xs font-bold uppercase tracking-wider transition-all',
             isRunning
               ? 'bg-gray-700 text-gray-500 cursor-not-allowed'
-              : 'bg-war-green text-black hover:bg-emerald-400 active:scale-95'
+              : mode === 'live'
+              ? 'bg-war-green text-black hover:bg-emerald-400 active:scale-95'
+              : 'bg-war-purple text-white hover:bg-purple-500 active:scale-95'
           )}
         >
-          {isRunning ? 'Running…' : '▶ Start Demo'}
+          {isRunning ? 'Running…' : mode === 'live' ? '▶ Run Live' : '▶ Play Demo'}
         </button>
 
         <button

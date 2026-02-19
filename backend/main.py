@@ -3,10 +3,12 @@ Negotiation War Room — FastAPI backend.
 
 Endpoints
 ─────────
-GET  /              → health check
-POST /negotiate     → start a new negotiation (non-blocking, returns session_id)
-WS   /ws/{session} → stream negotiation events as JSON lines
-GET  /demo-data     → return a pre-computed demo run (no LLM key required)
+GET  /                          → health check
+POST /negotiate                 → start a new negotiation (non-blocking, returns session_id)
+WS   /ws/{session_id}          → stream events for a session started via POST /negotiate
+WS   /ws/live/{purchaser_type} → one-shot: start + stream a live LLM negotiation
+WS   /ws/demo/{purchaser_type} → scripted demo (no LLM key required)
+GET  /demo-data                 → scripted events as JSON (no WS required)
 """
 
 from __future__ import annotations
@@ -98,6 +100,41 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
     finally:
         if session_id in _sessions:
             _sessions.pop(session_id, None)
+
+
+# ---------------------------------------------------------------------------
+# Live WebSocket — starts a real LLM negotiation and streams its events
+# ---------------------------------------------------------------------------
+
+@app.websocket("/ws/live/{purchaser_type}")
+async def websocket_live(websocket: WebSocket, purchaser_type: str = "tough"):
+    """
+    One-shot endpoint: connecting triggers a full live negotiation with
+    Claude Haiku 4.5 tool-calling.  Events stream until negotiation_end.
+    """
+    await websocket.accept()
+    log.info("Live WS connected (purchaser_type=%s)", purchaser_type)
+
+    from agents import event_stream, run_negotiation
+
+    # Start the negotiation concurrently with the streaming consumer
+    negotiation_task = asyncio.create_task(run_negotiation(purchaser_type))
+
+    try:
+        async for event in event_stream():
+            await websocket.send_text(json.dumps(event))
+            if event.get("type") == "negotiation_end":
+                break
+    except WebSocketDisconnect:
+        log.info("Live WS client disconnected early")
+        negotiation_task.cancel()
+    except Exception as exc:
+        log.error("Live WS error: %s", exc)
+        try:
+            await websocket.send_text(json.dumps({"type": "error", "message": str(exc)}))
+        except Exception:
+            pass
+        negotiation_task.cancel()
 
 
 # ---------------------------------------------------------------------------

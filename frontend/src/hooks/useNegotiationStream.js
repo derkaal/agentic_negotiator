@@ -16,6 +16,7 @@ const WS_BASE =
 
 const INITIAL_STATE = {
   status: 'idle',          // idle | connecting | running | done | error
+  mode: 'demo',            // 'demo' | 'live'
   purchaserType: 'tough',
   providers: {},
   thoughts: [],            // [{id, actor, tag, content}]
@@ -143,12 +144,12 @@ export function useNegotiationStream() {
         wsRef.current.close()
       }
 
-      setState({ ...INITIAL_STATE, status: 'connecting', purchaserType })
+      setState({ ...INITIAL_STATE, status: 'connecting', purchaserType, mode })
 
       const url =
-        mode === 'demo'
-          ? `${WS_BASE}/ws/demo/${purchaserType}`
-          : `${WS_BASE}/ws/live`
+        mode === 'live'
+          ? `${WS_BASE}/ws/live/${purchaserType}`
+          : `${WS_BASE}/ws/demo/${purchaserType}`
 
       const ws = new WebSocket(url)
       wsRef.current = ws
@@ -156,11 +157,10 @@ export function useNegotiationStream() {
       ws.onopen = () => setPartial({ status: 'connecting' })
       ws.onmessage = (e) => handleEvent(e.data)
       ws.onerror = () => setPartial({ status: 'error' })
-      ws.onclose = () => {
-        if (state.status !== 'done') {
-          setPartial({ status: 'idle' })
-        }
-      }
+      // Use functional update to read latest status without stale closure
+      ws.onclose = () => setState((prev) =>
+        prev.status !== 'done' ? { ...prev, status: 'idle' } : prev
+      )
     },
     [handleEvent]
   )

@@ -35,9 +35,11 @@ import { useNegotiationStream } from './hooks/useNegotiationStream'
 
 export default function App() {
   const [activePurchaserType, setActivePurchaserType] = useState('tough')
+  const [activeMode, setActiveMode] = useState('demo')
 
   const {
     status,
+    mode,
     purchaserType,
     providers,
     thoughts,
@@ -53,12 +55,18 @@ export default function App() {
   } = useNegotiationStream()
 
   const handleStart = useCallback(
-    (type) => {
+    (type, m) => {
+      const resolvedMode = m ?? activeMode
       setActivePurchaserType(type)
-      connect(type, 'demo')
+      setActiveMode(resolvedMode)
+      connect(type, resolvedMode)
     },
-    [connect]
+    [connect, activeMode]
   )
+
+  const handleModeChange = useCallback((m) => {
+    setActiveMode(m)
+  }, [])
 
   const handleReset = useCallback(() => {
     reset()
@@ -79,11 +87,13 @@ export default function App() {
       {/* Header */}
       <ControlBar
         status={status}
+        mode={activeMode}
         purchaserType={activePurchaserType}
         currentRound={currentRound}
         maxRounds={6}
         onStart={handleStart}
         onReset={handleReset}
+        onModeChange={handleModeChange}
       />
 
       {/* Main content */}
@@ -111,12 +121,20 @@ export default function App() {
                 <span className="w-2 h-2 rounded-full bg-war-red" /> Purchaser: Emergency Buyer (Speed 70%)
               </span>
             </div>
-            <button
-              onClick={() => handleStart('tough')}
-              className="mt-4 inline-block px-8 py-3 rounded-xl bg-war-green text-black font-black uppercase tracking-widest text-sm hover:bg-emerald-400 transition-colors active:scale-95"
-            >
-              ▶ Start Demo
-            </button>
+            <div className="flex items-center justify-center gap-3 mt-4">
+              <button
+                onClick={() => handleStart('tough', 'demo')}
+                className="px-6 py-3 rounded-xl bg-war-purple text-white font-black uppercase tracking-widest text-sm hover:bg-purple-500 transition-colors active:scale-95"
+              >
+                🎬 Play Demo
+              </button>
+              <button
+                onClick={() => handleStart('tough', 'live')}
+                className="px-6 py-3 rounded-xl bg-war-green text-black font-black uppercase tracking-widest text-sm hover:bg-emerald-400 transition-colors active:scale-95"
+              >
+                🤖 Run Live LLM
+              </button>
+            </div>
           </div>
         )}
 

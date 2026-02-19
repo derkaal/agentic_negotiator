@@ -1,27 +1,15 @@
 """
-LangGraph negotiation state machine.
+LangGraph negotiation state machine — powered by Claude Haiku 4.5.
+
+Each node runs a real LLM reasoning step, using LangChain tool-calling to
+invoke the grounding tools.  All intermediate steps are emitted as events
+so the War Room UI can stream [STRATEGY] → [TOOL_CALL] → [MATH_RESULT] → [DECISION].
 
 Graph topology
 ──────────────
-  START
-    │
-    ▼
- purchaser_node  ──── calls tools (utility_calculator, price_oracle)
-    │
-    ▼
- router          ──── decides which provider gets the next offer
-    │
-    ▼
- provider_node   ──── calls tools (margin_validator)
-    │
-    ▼
- evaluator_node  ──── scores the provider's counter-offer; decides ACCEPT / REJECT / NEXT_ROUND
-    │
-    ├── ACCEPT  → END
-    ├── REJECT (max rounds) → END
-    └── CONTINUE → purchaser_node
-
-Events are emitted via an async queue so the FastAPI WebSocket can stream them.
+  START → purchaser_node → provider_node → evaluator_node
+                 ↑_____________________________________|  (if CONTINUE)
+                                                       → END (ACCEPT / NO_DEAL)
 """
 
 from __future__ import annotations
@@ -29,32 +17,36 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import random
 from typing import Any, AsyncGenerator, Optional
 
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
-from langchain_openai import ChatOpenAI
+from dotenv import load_dotenv
+from langchain_anthropic import ChatAnthropic
+from langchain_core.messages import (
+    AIMessage,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+)
 from langgraph.graph import END, START, StateGraph
-from langgraph.prebuilt import ToolNode
 from pydantic import BaseModel
 
 from logic_engine import (
     PROVIDER_ASKS,
-    PROVIDER_FLOORS,
     margin_validator,
     price_oracle,
     utility_calculator,
 )
 
+load_dotenv()
+
 # ---------------------------------------------------------------------------
-# Shared event queue (populated by graph nodes, consumed by WS handler)
+# Shared async event queue
 # ---------------------------------------------------------------------------
 
 _event_queue: asyncio.Queue = asyncio.Queue()
 
 
 async def event_stream() -> AsyncGenerator[dict, None]:
-    """Async generator that yields events from the negotiation graph."""
     while True:
         event = await _event_queue.get()
         yield event
@@ -62,17 +54,21 @@ async def event_stream() -> AsyncGenerator[dict, None]:
             break
 
 
-def _emit(event: dict) -> None:
-    """Put an event on the queue from a sync context."""
-    try:
-        loop = asyncio.get_event_loop()
-        loop.call_soon_threadsafe(_event_queue.put_nowait, event)
-    except RuntimeError:
-        _event_queue.put_nowait(event)
-
-
-async def _emit_async(event: dict) -> None:
+async def _emit(event: dict) -> None:
     await _event_queue.put(event)
+
+
+# ---------------------------------------------------------------------------
+# LLM factory — Claude Haiku 4.5
+# ---------------------------------------------------------------------------
+
+def _build_llm() -> ChatAnthropic:
+    return ChatAnthropic(
+        model="claude-haiku-4-5-20251001",
+        temperature=0.3,
+        max_tokens=512,
+        anthropic_api_key=os.getenv("ANTHROPIC_API_KEY"),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -80,247 +76,279 @@ async def _emit_async(event: dict) -> None:
 # ---------------------------------------------------------------------------
 
 class NegotiationState(BaseModel):
-    """Shared state passed between LangGraph nodes."""
-
     round: int = 0
     max_rounds: int = 6
 
-    # Current best offer per provider  {provider_id: price}
     provider_offers: dict[str, float] = {
         "provider_1": PROVIDER_ASKS["provider_1"],
         "provider_2": PROVIDER_ASKS["provider_2"],
         "provider_3": PROVIDER_ASKS["provider_3"],
     }
 
-    # Purchaser's current target price (starts at market avg)
     purchaser_target: float = 150.0
-
-    # Best deal found so far
     best_deal: Optional[dict] = None
-
-    # Which provider is being negotiated with this round
     active_provider: str = "provider_1"
-
-    # Negotiation outcome: None | "ACCEPT" | "NO_DEAL"
     outcome: Optional[str] = None
-
-    # Convergence history for the line chart  [{round, gap, provider_id, price}]
     convergence_history: list[dict] = []
-
-    # Current radar shape for the last evaluated offer
-    radar_shape: dict = {
-        "price_score": 0,
-        "speed_score": 0,
-        "warranty_score": 0,
-    }
-
-    # Whether the last provider move triggered a veto
+    radar_shape: dict = {"price_score": 0, "speed_score": 0, "warranty_score": 0}
     last_veto: Optional[dict] = None
-
-    # Purchaser type drives weighting
     purchaser_type: str = "tough"
 
 
 # ---------------------------------------------------------------------------
-# Provider personas  (simulated — no real LLM calls for providers)
+# Provider static data
 # ---------------------------------------------------------------------------
 
 PROVIDER_PERSONAS = {
-    "provider_1": {
-        "name": "Nova Kicks",
-        "stock": 15,
-        "speed_days": 7,
-        "warranty_months": 12,
-        "concession_rate": 0.06,   # drops 6 % per round
-    },
-    "provider_2": {
-        "name": "SoleMaster",
-        "stock": 8,
-        "speed_days": 3,
-        "warranty_months": 24,
-        "concession_rate": 0.03,   # stubborn — premium brand
-    },
-    "provider_3": {
-        "name": "QuickShoe",
-        "stock": 25,
-        "speed_days": 2,
-        "warranty_months": 6,
-        "concession_rate": 0.08,   # eager to close
-    },
+    "provider_1": {"name": "Nova Kicks",  "stock": 15, "speed_days": 7,  "warranty_months": 12, "concession_rate": 0.06},
+    "provider_2": {"name": "SoleMaster",  "stock": 8,  "speed_days": 3,  "warranty_months": 24, "concession_rate": 0.03},
+    "provider_3": {"name": "QuickShoe",   "stock": 25, "speed_days": 2,  "warranty_months": 6,  "concession_rate": 0.08},
 }
 
 QUANTITY = 10
 
-
-# ---------------------------------------------------------------------------
-# LLM factory (lazy — only constructed when a negotiation starts)
-# ---------------------------------------------------------------------------
-
-def _build_llm() -> ChatOpenAI:
-    return ChatOpenAI(
-        model="gpt-4o-mini",
-        temperature=0.2,
-        streaming=False,
-        openai_api_key=os.getenv("OPENAI_API_KEY", "sk-demo"),
-    )
+PURCHASER_WEIGHT_HINT = {
+    "tough":     "Price 70%, Speed 15%, Warranty 15% — price is the dominant factor.",
+    "emergency": "Price 20%, Speed 70%, Warranty 10% — speed/delivery time is dominant.",
+}
 
 
 # ---------------------------------------------------------------------------
-# Purchaser node
+# Helper: map tool name → callable
+# ---------------------------------------------------------------------------
+
+_TOOL_MAP = {
+    "utility_calculator": utility_calculator,
+    "price_oracle":       price_oracle,
+    "margin_validator":   margin_validator,
+}
+
+
+# ---------------------------------------------------------------------------
+# Core helper: invoke LLM with tools, stream all tool calls as events,
+# return (final_ai_message, tool_logs)
+#   tool_logs = [(tool_name, args_dict, result_dict), ...]
+# ---------------------------------------------------------------------------
+
+async def _llm_with_tools(
+    messages: list,
+    tools: list,
+    actor: str,
+    forced_tool: Optional[str] = None,
+) -> tuple[AIMessage, list[tuple[str, dict, dict]]]:
+    llm = _build_llm()
+    bind_kwargs: dict = {}
+    if forced_tool:
+        bind_kwargs["tool_choice"] = {"type": "tool", "name": forced_tool}
+    llm_bound = llm.bind_tools(tools, **bind_kwargs)
+
+    response: AIMessage = await llm_bound.ainvoke(messages)
+    tool_logs: list[tuple[str, dict, dict]] = []
+
+    if not response.tool_calls:
+        return response, tool_logs
+
+    # Execute every tool call and feed results back
+    conv = list(messages) + [response]
+    for tc in response.tool_calls:
+        name: str = tc["name"]
+        args: dict = tc["args"]
+
+        await _emit({
+            "type": "thought", "actor": actor, "tag": "TOOL_CALL",
+            "content": f"{name}({', '.join(f'{k}={v!r}' for k, v in args.items())})",
+        })
+
+        result: dict = _TOOL_MAP[name].invoke(args)
+        tool_logs.append((name, args, result))
+
+        await _emit({
+            "type": "thought", "actor": actor, "tag": "MATH_RESULT",
+            "content": json.dumps(result, indent=2),
+        })
+
+        conv.append(ToolMessage(content=json.dumps(result), tool_call_id=tc["id"]))
+
+    # Re-invoke (no tools bound) to get the plain-text synthesis
+    final: AIMessage = await _build_llm().ainvoke(conv)
+    return final, tool_logs
+
+
+# ---------------------------------------------------------------------------
+# Purchaser Node
 # ---------------------------------------------------------------------------
 
 PURCHASER_SYSTEM = """\
-You are an Agentic Purchaser in a "Negotiation War Room".
-Your goal: buy 10 pairs of Limited Edition Sneakers at the BEST price.
+You are an Agentic Purchaser in a live Negotiation War Room.
+Goal: buy {qty} pairs of Limited Edition Sneakers at the best possible price.
 
-Rules:
-1. ALWAYS call price_oracle first to anchor yourself to market reality.
-2. ALWAYS call utility_calculator to score any offer before deciding.
-3. NEVER accept an offer if utility_calculator returns REJECT.
-4. Think step-by-step. Emit your reasoning in [STRATEGY] tags.
-5. Your purchaser_type is {purchaser_type}.
+Buyer profile — {profile_hint}
 
 Current provider offers (per pair):
-{provider_offers}
+{offers_table}
 
-Your current target price: ${purchaser_target}
-Round: {round}/{max_rounds}
+Your current target price: ${target:.2f}
+Negotiation round: {round}/{max_rounds}
+
+Rules you MUST follow:
+1. Call price_oracle first to anchor yourself to the market rate.
+2. Call utility_calculator to score the cheapest provider's current offer.
+3. State your updated target price and one-paragraph strategy.
+Keep responses concise.
 """
 
-
 async def purchaser_node(state: NegotiationState) -> dict:
-    """Purchaser agent — uses tools to set strategy each round."""
-    await _emit_async({
-        "type": "thought",
-        "actor": "PURCHASER",
-        "tag": "STRATEGY",
-        "content": (
-            f"[Round {state.round + 1}] Analysing provider landscape. "
-            f"Active providers: {list(state.provider_offers.keys())}. "
-            f"My target price: ${state.purchaser_target:.2f}."
-        ),
-    })
-
-    # --- Tool: PriceOracle ---
-    oracle_result = price_oracle.invoke({"quantity": QUANTITY})
-    await _emit_async({
-        "type": "thought",
-        "actor": "PURCHASER",
-        "tag": "TOOL_CALL",
-        "content": f"price_oracle(quantity={QUANTITY})",
-    })
-    await _emit_async({
-        "type": "thought",
-        "actor": "PURCHASER",
-        "tag": "MATH_RESULT",
-        "content": json.dumps(oracle_result, indent=2),
-    })
-
-    market_avg = oracle_result["market_average_per_pair"]
-    fair_low = oracle_result["fair_range"]["low"]
-
-    # Purchaser pushes target down each round (aggressive)
-    new_target = max(fair_low, state.purchaser_target - 3.0)
-    decision = (
-        f"Market average is ${market_avg}. My new target: ${new_target:.2f}. "
-        f"I will reject any offer above ${new_target * 1.05:.2f}."
+    offers_table = "\n".join(
+        f"  {PROVIDER_PERSONAS[pid]['name']:12s}  ${price:.2f}"
+        for pid, price in state.provider_offers.items()
     )
-    await _emit_async({
-        "type": "thought",
-        "actor": "PURCHASER",
-        "tag": "DECISION",
-        "content": decision,
-    })
+    system = PURCHASER_SYSTEM.format(
+        qty=QUANTITY,
+        profile_hint=PURCHASER_WEIGHT_HINT[state.purchaser_type],
+        offers_table=offers_table,
+        target=state.purchaser_target,
+        round=state.round + 1,
+        max_rounds=state.max_rounds,
+    )
 
-    # Choose which provider to engage (cheapest current offer)
-    best_provider = min(state.provider_offers, key=lambda p: state.provider_offers[p])
+    await _emit({"type": "thought", "actor": "PURCHASER", "tag": "STRATEGY",
+                 "content": f"[Round {state.round + 1}] Analysing provider landscape…"})
+
+    # ── Phase 1: price_oracle → market anchor ────────────────────────────
+    phase1_msgs = [
+        SystemMessage(content=system),
+        HumanMessage(content=(
+            "Call price_oracle to get today's market reference price "
+            "for Limited Edition Sneakers, then summarise your opening strategy."
+        )),
+    ]
+    strategy_reply, strategy_logs = await _llm_with_tools(
+        phase1_msgs, [price_oracle], actor="PURCHASER",
+        forced_tool="price_oracle",
+    )
+    await _emit({"type": "thought", "actor": "PURCHASER", "tag": "STRATEGY",
+                 "content": strategy_reply.content.strip()})
+
+    # Extract market avg for target recalculation
+    market_avg = 150.0
+    for _, _, result in strategy_logs:
+        if "market_average_per_pair" in result:
+            market_avg = result["market_average_per_pair"]
+            break
+
+    # ── Phase 2: utility_calculator on the best current offer ─────────────
+    best_pid = min(state.provider_offers, key=lambda p: state.provider_offers[p])
+    best_price = state.provider_offers[best_pid]
+    persona = PROVIDER_PERSONAS[best_pid]
+
+    phase2_msgs = [
+        SystemMessage(content=system),
+        HumanMessage(content=(
+            f"Score {persona['name']}'s offer using utility_calculator: "
+            f"price={best_price}, speed_days={persona['speed_days']}, "
+            f"warranty_months={persona['warranty_months']}, "
+            f"purchaser_type='{state.purchaser_type}'. "
+            "After seeing the score, state your updated target price for this round."
+        )),
+    ]
+    eval_reply, _ = await _llm_with_tools(
+        phase2_msgs, [utility_calculator], actor="PURCHASER",
+        forced_tool="utility_calculator",
+    )
+    await _emit({"type": "thought", "actor": "PURCHASER", "tag": "DECISION",
+                 "content": eval_reply.content.strip()})
+
+    # Deterministic target update (LLM reasoning is advisory)
+    fair_low = market_avg * 0.90
+    new_target = max(fair_low, state.purchaser_target - 3.0)
 
     return {
         "round": state.round + 1,
         "purchaser_target": new_target,
-        "active_provider": best_provider,
+        "active_provider": best_pid,
     }
 
 
 # ---------------------------------------------------------------------------
-# Provider node (simulated concession logic + MarginValidator guard)
+# Provider Node
 # ---------------------------------------------------------------------------
 
+PROVIDER_SYSTEM = """\
+You are the negotiation agent for {name} (ID: {pid}).
+Item: Limited Edition Sneakers — {speed_days}-day delivery, {warranty_months}-month warranty.
+
+Your current ask: ${current_price:.2f} per pair.
+Purchaser's target: ${purchaser_target:.2f} per pair.
+
+You MUST call margin_validator before offering any price reduction.
+If it returns VETO, you must hold your current price.
+If it returns APPROVED, offer the validated price.
+Be brief — one sentence decision after the tool result.
+"""
+
 async def provider_node(state: NegotiationState) -> dict:
-    """Provider agent — makes concessions but is guarded by MarginValidator."""
     pid = state.active_provider
     persona = PROVIDER_PERSONAS[pid]
     current_price = state.provider_offers[pid]
 
-    await _emit_async({
-        "type": "thought",
-        "actor": pid.upper(),
-        "tag": "STRATEGY",
-        "content": (
-            f"{persona['name']} considering concession. "
-            f"Current ask: ${current_price:.2f}. "
-            f"Purchaser target: ${state.purchaser_target:.2f}."
-        ),
-    })
+    await _emit({"type": "thought", "actor": pid.upper(), "tag": "STRATEGY",
+                 "content": (
+                     f"{persona['name']} evaluating concession. "
+                     f"Ask: ${current_price:.2f} | Purchaser target: ${state.purchaser_target:.2f}."
+                 )})
 
-    # Calculate proposed concession
-    concession = current_price * persona["concession_rate"]
-    proposed = round(current_price - concession, 2)
+    # Compute the candidate concession price
+    proposed = round(current_price * (1 - persona["concession_rate"]), 2)
 
-    await _emit_async({
-        "type": "thought",
-        "actor": pid.upper(),
-        "tag": "TOOL_CALL",
-        "content": f"margin_validator(provider_id='{pid}', proposed_price={proposed})",
-    })
+    system = PROVIDER_SYSTEM.format(
+        name=persona["name"], pid=pid,
+        speed_days=persona["speed_days"],
+        warranty_months=persona["warranty_months"],
+        current_price=current_price,
+        purchaser_target=state.purchaser_target,
+    )
+    messages = [
+        SystemMessage(content=system),
+        HumanMessage(content=(
+            f"Validate a proposed price of ${proposed:.2f} by calling "
+            f"margin_validator with provider_id='{pid}' and "
+            f"proposed_price={proposed}.  Then state your final offer."
+        )),
+    ]
 
-    # --- Tool: MarginValidator ---
-    veto_result = margin_validator.invoke({"provider_id": pid, "proposed_price": proposed})
+    final_msg, tool_logs = await _llm_with_tools(
+        messages, [margin_validator], actor=pid.upper(),
+        forced_tool="margin_validator",
+    )
 
-    await _emit_async({
-        "type": "thought",
-        "actor": pid.upper(),
-        "tag": "MATH_RESULT",
-        "content": json.dumps(veto_result, indent=2),
-    })
-
+    # Parse veto / approved
     last_veto = None
-    final_price = current_price  # default: hold
+    final_price = current_price  # safe default: hold
 
-    if veto_result["status"] == "VETO":
-        # Hard veto — emit a VETO flash event and hold the price
-        last_veto = veto_result
-        final_price = current_price
-        await _emit_async({
-            "type": "veto",
-            "actor": pid.upper(),
-            "message": veto_result["message"],
-            "proposed_price": proposed,
-            "floor_price": PROVIDER_FLOORS[pid],
-        })
-        await _emit_async({
-            "type": "thought",
-            "actor": pid.upper(),
-            "tag": "DECISION",
-            "content": f"VETO triggered — holding price at ${current_price:.2f}.",
-        })
-    else:
-        final_price = proposed
-        await _emit_async({
-            "type": "thought",
-            "actor": pid.upper(),
-            "tag": "DECISION",
-            "content": (
-                f"Concession approved. New offer: ${final_price:.2f} "
-                f"(margin {veto_result['margin_pct']} % above floor)."
-            ),
-        })
+    for tool_name, args, result in tool_logs:
+        if tool_name != "margin_validator":
+            continue
+        if result.get("status") == "VETO":
+            last_veto = result
+            await _emit({
+                "type": "veto",
+                "actor": pid.upper(),
+                "message": result["message"],
+                "proposed_price": args["proposed_price"],
+                "floor_price": result["floor_price"],
+            })
+            await _emit({"type": "thought", "actor": pid.upper(), "tag": "DECISION",
+                         "content": f"VETO — holding at ${current_price:.2f}."})
+        else:
+            final_price = args["proposed_price"]
+            await _emit({"type": "thought", "actor": pid.upper(), "tag": "DECISION",
+                         "content": final_msg.content.strip()})
 
     new_offers = dict(state.provider_offers)
     new_offers[pid] = final_price
 
     gap = round(final_price - state.purchaser_target, 2)
-    convergence_entry = {
+    conv_entry = {
         "round": state.round,
         "gap": gap,
         "provider_id": pid,
@@ -328,40 +356,48 @@ async def provider_node(state: NegotiationState) -> dict:
         "price": final_price,
         "purchaser_target": state.purchaser_target,
     }
-
-    await _emit_async({
-        "type": "convergence",
-        "data": convergence_entry,
-    })
+    await _emit({"type": "convergence", "data": conv_entry})
 
     return {
         "provider_offers": new_offers,
         "last_veto": last_veto,
-        "convergence_history": state.convergence_history + [convergence_entry],
+        "convergence_history": state.convergence_history + [conv_entry],
     }
 
 
 # ---------------------------------------------------------------------------
-# Evaluator node — scores the active provider's offer, decides next step
+# Evaluator Node
 # ---------------------------------------------------------------------------
 
+EVALUATOR_SYSTEM = """\
+You are a neutral deal evaluator.
+Score result from utility_calculator:
+{score_json}
+
+Buyer profile: {profile_hint}
+Purchaser's current target: ${target:.2f}
+Provider's price: ${price:.2f}
+
+Thresholds (hard rules — you cannot override them):
+  • overall_score >= 55 AND price <= target × 1.05 → ACCEPT
+  • otherwise → REJECT (explain which dimension is dragging the score)
+
+Give a single direct sentence verdict.
+"""
+
 async def evaluator_node(state: NegotiationState) -> dict:
-    """Score the current best offer and decide: ACCEPT / REJECT / CONTINUE."""
     pid = state.active_provider
     persona = PROVIDER_PERSONAS[pid]
     price = state.provider_offers[pid]
 
-    await _emit_async({
-        "type": "thought",
-        "actor": "PURCHASER",
-        "tag": "TOOL_CALL",
-        "content": (
-            f"utility_calculator(price={price}, "
-            f"speed_days={persona['speed_days']}, "
-            f"warranty_months={persona['warranty_months']}, "
-            f"purchaser_type='{state.purchaser_type}')"
-        ),
-    })
+    # Deterministic tool call
+    await _emit({"type": "thought", "actor": "PURCHASER", "tag": "TOOL_CALL",
+                 "content": (
+                     f"utility_calculator(price={price}, "
+                     f"speed_days={persona['speed_days']}, "
+                     f"warranty_months={persona['warranty_months']}, "
+                     f"purchaser_type='{state.purchaser_type}')"
+                 )})
 
     score_result = utility_calculator.invoke({
         "price": price,
@@ -370,30 +406,39 @@ async def evaluator_node(state: NegotiationState) -> dict:
         "purchaser_type": state.purchaser_type,
     })
 
-    await _emit_async({
-        "type": "thought",
-        "actor": "PURCHASER",
-        "tag": "MATH_RESULT",
-        "content": json.dumps(score_result, indent=2),
-    })
+    await _emit({"type": "thought", "actor": "PURCHASER", "tag": "MATH_RESULT",
+                 "content": json.dumps(score_result, indent=2)})
 
     dim = score_result["dimension_scores"]
     radar = {
-        "price_score": dim["price"],
-        "speed_score": dim["speed"],
+        "price_score":    dim["price"],
+        "speed_score":    dim["speed"],
         "warranty_score": dim["warranty"],
-        "overall": score_result["overall_score"],
-        "provider": persona["name"],
+        "overall":        score_result["overall_score"],
+        "provider":       persona["name"],
     }
+    await _emit({"type": "radar", "data": radar})
 
-    await _emit_async({"type": "radar", "data": radar})
+    # LLM interprets (but hard thresholds below are authoritative)
+    eval_system = EVALUATOR_SYSTEM.format(
+        score_json=json.dumps(score_result, indent=2),
+        profile_hint=PURCHASER_WEIGHT_HINT[state.purchaser_type],
+        target=state.purchaser_target,
+        price=price,
+    )
+    llm = _build_llm()
+    interp: AIMessage = await llm.ainvoke([
+        SystemMessage(content=eval_system),
+        HumanMessage(content="What is your verdict?"),
+    ])
+    await _emit({"type": "thought", "actor": "PURCHASER", "tag": "DECISION",
+                 "content": interp.content.strip()})
 
-    verdict = score_result["verdict"]
+    # Hard decision logic
     overall = score_result["overall_score"]
-    outcome = None
+    within_target = price <= state.purchaser_target * 1.05
 
-    if verdict == "ACCEPT" and price <= state.purchaser_target * 1.05:
-        outcome = "ACCEPT"
+    if overall >= 55 and within_target:
         best_deal = {
             "provider_id": pid,
             "provider_name": persona["name"],
@@ -402,24 +447,11 @@ async def evaluator_node(state: NegotiationState) -> dict:
             "warranty_months": persona["warranty_months"],
             "utility_score": overall,
         }
-        await _emit_async({
-            "type": "thought",
-            "actor": "PURCHASER",
-            "tag": "DECISION",
-            "content": (
-                f"ACCEPT — {persona['name']} offer at ${price:.2f} scores "
-                f"{overall}/100.  Deal closed!"
-            ),
-        })
-        await _emit_async({
-            "type": "negotiation_end",
-            "outcome": "ACCEPT",
-            "deal": best_deal,
-        })
+        await _emit({"type": "negotiation_end", "outcome": "ACCEPT", "deal": best_deal})
         return {"outcome": "ACCEPT", "best_deal": best_deal, "radar_shape": radar}
 
-    elif state.round >= state.max_rounds:
-        # Time's up — take the best available or walk
+    if state.round >= state.max_rounds:
+        # Last resort: accept best available if it clears a lower bar
         best_pid = min(state.provider_offers, key=lambda p: state.provider_offers[p])
         bp = state.provider_offers[best_pid]
         bp_persona = PROVIDER_PERSONAS[best_pid]
@@ -429,8 +461,7 @@ async def evaluator_node(state: NegotiationState) -> dict:
             "warranty_months": bp_persona["warranty_months"],
             "purchaser_type": state.purchaser_type,
         })
-        if final_score["verdict"] == "ACCEPT":
-            outcome = "ACCEPT"
+        if final_score["overall_score"] >= 50:
             best_deal = {
                 "provider_id": best_pid,
                 "provider_name": bp_persona["name"],
@@ -439,49 +470,13 @@ async def evaluator_node(state: NegotiationState) -> dict:
                 "warranty_months": bp_persona["warranty_months"],
                 "utility_score": final_score["overall_score"],
             }
-            await _emit_async({
-                "type": "thought",
-                "actor": "PURCHASER",
-                "tag": "DECISION",
-                "content": f"Rounds exhausted. Best available: {bp_persona['name']} at ${bp:.2f}. ACCEPTING.",
-            })
-            await _emit_async({
-                "type": "negotiation_end",
-                "outcome": "ACCEPT",
-                "deal": best_deal,
-            })
+            await _emit({"type": "negotiation_end", "outcome": "ACCEPT", "deal": best_deal})
             return {"outcome": "ACCEPT", "best_deal": best_deal, "radar_shape": radar}
-        else:
-            outcome = "NO_DEAL"
-            await _emit_async({
-                "type": "thought",
-                "actor": "PURCHASER",
-                "tag": "DECISION",
-                "content": (
-                    f"Rounds exhausted. Best score {final_score['overall_score']}/100 — "
-                    "below threshold.  Walking away."
-                ),
-            })
-            await _emit_async({
-                "type": "negotiation_end",
-                "outcome": "NO_DEAL",
-                "deal": None,
-            })
-            return {"outcome": "NO_DEAL", "best_deal": None, "radar_shape": radar}
 
-    else:
-        # Continue negotiating
-        await _emit_async({
-            "type": "thought",
-            "actor": "PURCHASER",
-            "tag": "DECISION",
-            "content": (
-                f"REJECT — {persona['name']} offer at ${price:.2f} scores "
-                f"{overall}/100 (need ≥ 55 AND price ≤ ${state.purchaser_target * 1.05:.2f}).  "
-                "Continuing pressure."
-            ),
-        })
-        return {"outcome": None, "radar_shape": radar}
+        await _emit({"type": "negotiation_end", "outcome": "NO_DEAL", "deal": None})
+        return {"outcome": "NO_DEAL", "best_deal": None, "radar_shape": radar}
+
+    return {"outcome": None, "radar_shape": radar}
 
 
 # ---------------------------------------------------------------------------
@@ -495,20 +490,18 @@ def _route_after_evaluator(state: NegotiationState) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Build the LangGraph
+# Build graph
 # ---------------------------------------------------------------------------
 
 def build_graph() -> Any:
     g = StateGraph(NegotiationState)
     g.add_node("purchaser_node", purchaser_node)
-    g.add_node("provider_node", provider_node)
+    g.add_node("provider_node",  provider_node)
     g.add_node("evaluator_node", evaluator_node)
-
     g.add_edge(START, "purchaser_node")
     g.add_edge("purchaser_node", "provider_node")
-    g.add_edge("provider_node", "evaluator_node")
+    g.add_edge("provider_node",  "evaluator_node")
     g.add_conditional_edges("evaluator_node", _route_after_evaluator)
-
     return g.compile()
 
 
@@ -520,28 +513,23 @@ NEGOTIATION_GRAPH = build_graph()
 # ---------------------------------------------------------------------------
 
 async def run_negotiation(purchaser_type: str = "tough") -> None:
-    """
-    Run a full negotiation session and stream events through _event_queue.
-    Call event_stream() concurrently to consume the events.
-    """
-    # Reset the queue
+    """Drain the queue, emit start event, run the full graph."""
     while not _event_queue.empty():
         _event_queue.get_nowait()
 
-    initial_state = NegotiationState(purchaser_type=purchaser_type)
-
-    await _emit_async({
+    await _emit({
         "type": "negotiation_start",
         "purchaser_type": purchaser_type,
         "providers": {
             pid: {
                 "name": p["name"],
                 "opening_ask": PROVIDER_ASKS[pid],
-                "speed_days": p["speed_days"],
+                "speed_days":  p["speed_days"],
                 "warranty_months": p["warranty_months"],
             }
             for pid, p in PROVIDER_PERSONAS.items()
         },
     })
 
-    await NEGOTIATION_GRAPH.ainvoke(initial_state.model_dump())
+    initial = NegotiationState(purchaser_type=purchaser_type)
+    await NEGOTIATION_GRAPH.ainvoke(initial.model_dump())
