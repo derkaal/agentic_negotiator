@@ -99,17 +99,19 @@ const INITIAL_STATE = {
   terminationEvent: null,    // termination_round event
   taskSessions:   [],        // aggregated session summaries for 1B-MP-MS
 
-  // N-to-N Market (MBMPMS) state
-  isMarket:       false,
-  marketScenario: null,          // 'used_car'
-  marketBuyers:   [],            // buyer config list from market_start
-  marketSellers:  [],            // seller config list from market_start
-  pairMatrix:     {},            // "buyerId:sellerId" → latest pair snapshot
-  closedDeals:    [],            // deal_closed events
-  switchEvents:   [],            // market_switch events
-  dealRate:       null,          // 0-1
-  marketScore:    null,          // {global_score, buyer_score, seller_score}
-  marketEnd:      null,          // market_end event payload
+  // N-to-N Market (MBMPMS v2 — Game-Theoretic) state
+  isMarket:           false,
+  marketScenario:     null,      // 'used_car'
+  marketBuyers:       [],        // buyer config list from market_start
+  marketSellers:      [],        // seller config list from market_start
+  pairMatrix:         {},        // "buyerId:sellerId" → latest pair snapshot (incl. seller_utility, seller_strategy)
+  closedDeals:        [],        // deal_closed events (incl. welfare, surplus, pareto, profit map)
+  switchEvents:       [],        // market_switch events (incl. seller_score_at_switch, seller_strategy_before)
+  dealRate:           null,      // 0-1
+  marketScore:        null,      // {global_score, buyer_score, seller_score} — adjusted
+  sellerStrategies:   {},        // {sellerId: 'normal'|'match_market'|'hold_margin'} — live
+  auditTrail:         [],        // per-deal Profit Map rows from market_end
+  marketEnd:          null,      // full market_end payload (welfare totals, pareto, violations)
 }
 
 let _thoughtId = 0
@@ -326,18 +328,20 @@ export function useNegotiationStream() {
       case 'market_start':
         setState((prev) => ({
           ...INITIAL_STATE,
-          status:        'running',
-          mode:          'market',
-          isMarket:      true,
-          marketScenario: event.scenario,
-          marketBuyers:   event.buyers  ?? [],
-          marketSellers:  event.sellers ?? [],
-          pairMatrix:     {},
-          closedDeals:    [],
-          switchEvents:   [],
-          dealRate:       null,
-          marketScore:    null,
-          marketEnd:      null,
+          status:           'running',
+          mode:             'market',
+          isMarket:         true,
+          marketScenario:   event.scenario,
+          marketBuyers:     event.buyers   ?? [],
+          marketSellers:    event.sellers  ?? [],
+          pairMatrix:       {},
+          closedDeals:      [],
+          switchEvents:     [],
+          dealRate:         null,
+          marketScore:      null,
+          sellerStrategies: {},
+          auditTrail:       [],
+          marketEnd:        null,
         }))
         break
 
@@ -348,7 +352,12 @@ export function useNegotiationStream() {
           for (const p of (event.pairs ?? [])) {
             nextMatrix[`${p.buyer_id}:${p.seller_id}`] = p
           }
-          return { ...prev, pairMatrix: nextMatrix, currentRound: event.round ?? prev.currentRound }
+          return {
+            ...prev,
+            pairMatrix:       nextMatrix,
+            currentRound:     event.round ?? prev.currentRound,
+            sellerStrategies: event.seller_strategies ?? prev.sellerStrategies,
+          }
         })
         break
 
@@ -389,9 +398,10 @@ export function useNegotiationStream() {
       case 'market_end':
         setState((prev) => ({
           ...prev,
-          status:    'done',
-          marketEnd: event,
-          outcome:   event.closed > 0 ? 'DEAL' : 'NO_DEAL',
+          status:     'done',
+          marketEnd:  event,
+          auditTrail: event.audit_trail ?? [],
+          outcome:    event.closed > 0 ? 'DEAL' : 'NO_DEAL',
         }))
         break
 
