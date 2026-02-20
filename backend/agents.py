@@ -192,7 +192,7 @@ Negotiation round: {round}/{max_rounds}
 
 Rules you MUST follow:
 1. Call price_oracle first to anchor yourself to the market rate.
-2. Call utility_calculator to score the cheapest provider's current offer.
+2. Call utility_calculator to score EACH provider's current offer in turn.
 3. State your updated target price and one-paragraph strategy.
 Keep responses concise.
 """
@@ -236,27 +236,25 @@ async def purchaser_node(state: NegotiationState) -> dict:
             market_avg = result["market_average_per_pair"]
             break
 
-    # ── Phase 2: utility_calculator on the best current offer ─────────────
-    best_pid = min(state.provider_offers, key=lambda p: state.provider_offers[p])
-    best_price = state.provider_offers[best_pid]
-    persona = PROVIDER_PERSONAS[best_pid]
-
-    phase2_msgs = [
-        SystemMessage(content=system),
-        HumanMessage(content=(
-            f"Score {persona['name']}'s offer using utility_calculator: "
-            f"price={best_price}, speed_days={persona['speed_days']}, "
-            f"warranty_months={persona['warranty_months']}, "
-            f"purchaser_type='{state.purchaser_type}'. "
-            "After seeing the score, state your updated target price for this round."
-        )),
-    ]
-    eval_reply, _ = await _llm_with_tools(
-        phase2_msgs, [utility_calculator], actor="PURCHASER",
-        forced_tool="utility_calculator",
-    )
-    await _emit({"type": "thought", "actor": "PURCHASER", "tag": "DECISION",
-                 "content": eval_reply.content.strip()})
+    # ── Phase 2: utility_calculator on ALL three providers ────────────────
+    for pid, price in state.provider_offers.items():
+        persona = PROVIDER_PERSONAS[pid]
+        phase2_msgs = [
+            SystemMessage(content=system),
+            HumanMessage(content=(
+                f"Score {persona['name']}'s offer using utility_calculator: "
+                f"price={price}, speed_days={persona['speed_days']}, "
+                f"warranty_months={persona['warranty_months']}, "
+                f"purchaser_type='{state.purchaser_type}'. "
+                "Briefly state whether this offer is worth pursuing."
+            )),
+        ]
+        eval_reply, _ = await _llm_with_tools(
+            phase2_msgs, [utility_calculator], actor="PURCHASER",
+            forced_tool="utility_calculator",
+        )
+        await _emit({"type": "thought", "actor": "PURCHASER", "tag": "DECISION",
+                     "content": f"[{persona['name']}] {eval_reply.content.strip()}"})
 
     # Deterministic target update (LLM reasoning is advisory)
     fair_low = market_avg * 0.90
@@ -265,7 +263,6 @@ async def purchaser_node(state: NegotiationState) -> dict:
     return {
         "round": state.round + 1,
         "purchaser_target": new_target,
-        "active_provider": best_pid,
     }
 
 
@@ -287,81 +284,81 @@ Be brief — one sentence decision after the tool result.
 """
 
 async def provider_node(state: NegotiationState) -> dict:
-    pid = state.active_provider
-    persona = PROVIDER_PERSONAS[pid]
-    current_price = state.provider_offers[pid]
-
-    await _emit({"type": "thought", "actor": pid.upper(), "tag": "STRATEGY",
-                 "content": (
-                     f"{persona['name']} evaluating concession. "
-                     f"Ask: ${current_price:.2f} | Purchaser target: ${state.purchaser_target:.2f}."
-                 )})
-
-    # Compute the candidate concession price
-    proposed = round(current_price * (1 - persona["concession_rate"]), 2)
-
-    system = PROVIDER_SYSTEM.format(
-        name=persona["name"], pid=pid,
-        speed_days=persona["speed_days"],
-        warranty_months=persona["warranty_months"],
-        current_price=current_price,
-        purchaser_target=state.purchaser_target,
-    )
-    messages = [
-        SystemMessage(content=system),
-        HumanMessage(content=(
-            f"Validate a proposed price of ${proposed:.2f} by calling "
-            f"margin_validator with provider_id='{pid}' and "
-            f"proposed_price={proposed}.  Then state your final offer."
-        )),
-    ]
-
-    final_msg, tool_logs = await _llm_with_tools(
-        messages, [margin_validator], actor=pid.upper(),
-        forced_tool="margin_validator",
-    )
-
-    # Parse veto / approved
-    last_veto = None
-    final_price = current_price  # safe default: hold
-
-    for tool_name, args, result in tool_logs:
-        if tool_name != "margin_validator":
-            continue
-        if result.get("status") == "VETO":
-            last_veto = result
-            await _emit({
-                "type": "veto",
-                "actor": pid.upper(),
-                "message": result["message"],
-                "proposed_price": args["proposed_price"],
-                "floor_price": result["floor_price"],
-            })
-            await _emit({"type": "thought", "actor": pid.upper(), "tag": "DECISION",
-                         "content": f"VETO — holding at ${current_price:.2f}."})
-        else:
-            final_price = args["proposed_price"]
-            await _emit({"type": "thought", "actor": pid.upper(), "tag": "DECISION",
-                         "content": final_msg.content.strip()})
-
     new_offers = dict(state.provider_offers)
-    new_offers[pid] = final_price
+    last_veto = None
+    convergence_additions: list[dict] = []
 
-    gap = round(final_price - state.purchaser_target, 2)
-    conv_entry = {
-        "round": state.round,
-        "gap": gap,
-        "provider_id": pid,
-        "provider_name": persona["name"],
-        "price": final_price,
-        "purchaser_target": state.purchaser_target,
-    }
-    await _emit({"type": "convergence", "data": conv_entry})
+    # Negotiate with every provider in sequence each round
+    for pid, persona in PROVIDER_PERSONAS.items():
+        current_price = new_offers[pid]
+
+        await _emit({"type": "thought", "actor": pid.upper(), "tag": "STRATEGY",
+                     "content": (
+                         f"{persona['name']} evaluating concession. "
+                         f"Ask: ${current_price:.2f} | Purchaser target: ${state.purchaser_target:.2f}."
+                     )})
+
+        proposed = round(current_price * (1 - persona["concession_rate"]), 2)
+
+        system = PROVIDER_SYSTEM.format(
+            name=persona["name"], pid=pid,
+            speed_days=persona["speed_days"],
+            warranty_months=persona["warranty_months"],
+            current_price=current_price,
+            purchaser_target=state.purchaser_target,
+        )
+        messages = [
+            SystemMessage(content=system),
+            HumanMessage(content=(
+                f"Validate a proposed price of ${proposed:.2f} by calling "
+                f"margin_validator with provider_id='{pid}' and "
+                f"proposed_price={proposed}.  Then state your final offer."
+            )),
+        ]
+
+        final_msg, tool_logs = await _llm_with_tools(
+            messages, [margin_validator], actor=pid.upper(),
+            forced_tool="margin_validator",
+        )
+
+        final_price = current_price  # safe default: hold
+        for tool_name, args, result in tool_logs:
+            if tool_name != "margin_validator":
+                continue
+            if result.get("status") == "VETO":
+                last_veto = result
+                await _emit({
+                    "type": "veto",
+                    "actor": pid.upper(),
+                    "message": result["message"],
+                    "proposed_price": args["proposed_price"],
+                    "floor_price": result["floor_price"],
+                })
+                await _emit({"type": "thought", "actor": pid.upper(), "tag": "DECISION",
+                             "content": f"VETO — holding at ${current_price:.2f}."})
+            else:
+                final_price = args["proposed_price"]
+                await _emit({"type": "thought", "actor": pid.upper(), "tag": "DECISION",
+                             "content": final_msg.content.strip()})
+
+        new_offers[pid] = final_price
+
+        gap = round(final_price - state.purchaser_target, 2)
+        conv_entry = {
+            "round": state.round,
+            "gap": gap,
+            "provider_id": pid,
+            "provider_name": persona["name"],
+            "price": final_price,
+            "purchaser_target": state.purchaser_target,
+        }
+        convergence_additions.append(conv_entry)
+        await _emit({"type": "convergence", "data": conv_entry})
 
     return {
         "provider_offers": new_offers,
         "last_veto": last_veto,
-        "convergence_history": state.convergence_history + [conv_entry],
+        "convergence_history": state.convergence_history + convergence_additions,
     }
 
 
@@ -386,28 +383,33 @@ Give a single direct sentence verdict.
 """
 
 async def evaluator_node(state: NegotiationState) -> dict:
-    pid = state.active_provider
+    # Score all three providers and pick the highest utility deal
+    all_scores: dict[str, dict] = {}
+    for pid, persona in PROVIDER_PERSONAS.items():
+        price = state.provider_offers[pid]
+        await _emit({"type": "thought", "actor": "PURCHASER", "tag": "TOOL_CALL",
+                     "content": (
+                         f"utility_calculator(price={price}, "
+                         f"speed_days={persona['speed_days']}, "
+                         f"warranty_months={persona['warranty_months']}, "
+                         f"purchaser_type='{state.purchaser_type}')"
+                     )})
+        score_result = utility_calculator.invoke({
+            "price": price,
+            "speed_days": persona["speed_days"],
+            "warranty_months": persona["warranty_months"],
+            "purchaser_type": state.purchaser_type,
+        })
+        all_scores[pid] = score_result
+        await _emit({"type": "thought", "actor": "PURCHASER", "tag": "MATH_RESULT",
+                     "content": f"[{persona['name']}] " + json.dumps(score_result, indent=2)})
+
+    # Best = highest overall utility score
+    best_pid = max(all_scores, key=lambda p: all_scores[p]["overall_score"])
+    pid = best_pid
     persona = PROVIDER_PERSONAS[pid]
     price = state.provider_offers[pid]
-
-    # Deterministic tool call
-    await _emit({"type": "thought", "actor": "PURCHASER", "tag": "TOOL_CALL",
-                 "content": (
-                     f"utility_calculator(price={price}, "
-                     f"speed_days={persona['speed_days']}, "
-                     f"warranty_months={persona['warranty_months']}, "
-                     f"purchaser_type='{state.purchaser_type}')"
-                 )})
-
-    score_result = utility_calculator.invoke({
-        "price": price,
-        "speed_days": persona["speed_days"],
-        "warranty_months": persona["warranty_months"],
-        "purchaser_type": state.purchaser_type,
-    })
-
-    await _emit({"type": "thought", "actor": "PURCHASER", "tag": "MATH_RESULT",
-                 "content": json.dumps(score_result, indent=2)})
+    score_result = all_scores[pid]
 
     dim = score_result["dimension_scores"]
     radar = {
@@ -429,7 +431,9 @@ async def evaluator_node(state: NegotiationState) -> dict:
     llm = _build_llm()
     interp: AIMessage = await llm.ainvoke([
         SystemMessage(content=eval_system),
-        HumanMessage(content="What is your verdict?"),
+        HumanMessage(content=(
+            f"Best offer is from {persona['name']} at ${price:.2f}. What is your verdict?"
+        )),
     ])
     await _emit({"type": "thought", "actor": "PURCHASER", "tag": "DECISION",
                  "content": interp.content.strip()})
@@ -448,35 +452,30 @@ async def evaluator_node(state: NegotiationState) -> dict:
             "utility_score": overall,
         }
         await _emit({"type": "negotiation_end", "outcome": "ACCEPT", "deal": best_deal})
-        return {"outcome": "ACCEPT", "best_deal": best_deal, "radar_shape": radar}
+        return {"outcome": "ACCEPT", "best_deal": best_deal, "active_provider": pid, "radar_shape": radar}
 
     if state.round >= state.max_rounds:
-        # Last resort: accept best available if it clears a lower bar
-        best_pid = min(state.provider_offers, key=lambda p: state.provider_offers[p])
-        bp = state.provider_offers[best_pid]
-        bp_persona = PROVIDER_PERSONAS[best_pid]
-        final_score = utility_calculator.invoke({
-            "price": bp,
-            "speed_days": bp_persona["speed_days"],
-            "warranty_months": bp_persona["warranty_months"],
-            "purchaser_type": state.purchaser_type,
-        })
+        # Last resort: best utility across all providers at a lower bar
+        fallback_pid = max(all_scores, key=lambda p: all_scores[p]["overall_score"])
+        fp = state.provider_offers[fallback_pid]
+        fp_persona = PROVIDER_PERSONAS[fallback_pid]
+        final_score = all_scores[fallback_pid]
         if final_score["overall_score"] >= 50:
             best_deal = {
-                "provider_id": best_pid,
-                "provider_name": bp_persona["name"],
-                "price": bp,
-                "speed_days": bp_persona["speed_days"],
-                "warranty_months": bp_persona["warranty_months"],
+                "provider_id": fallback_pid,
+                "provider_name": fp_persona["name"],
+                "price": fp,
+                "speed_days": fp_persona["speed_days"],
+                "warranty_months": fp_persona["warranty_months"],
                 "utility_score": final_score["overall_score"],
             }
             await _emit({"type": "negotiation_end", "outcome": "ACCEPT", "deal": best_deal})
-            return {"outcome": "ACCEPT", "best_deal": best_deal, "radar_shape": radar}
+            return {"outcome": "ACCEPT", "best_deal": best_deal, "active_provider": fallback_pid, "radar_shape": radar}
 
         await _emit({"type": "negotiation_end", "outcome": "NO_DEAL", "deal": None})
         return {"outcome": "NO_DEAL", "best_deal": None, "radar_shape": radar}
 
-    return {"outcome": None, "radar_shape": radar}
+    return {"outcome": None, "active_provider": pid, "radar_shape": radar}
 
 
 # ---------------------------------------------------------------------------
