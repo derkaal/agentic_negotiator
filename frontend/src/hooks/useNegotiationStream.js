@@ -12,6 +12,7 @@
  *   'ab-test' → /ws/ab-test/{type}      (scripted Solo vs Cyborg comparison)
  *   'task'    → /ws/task/{taskId}?agent_mode=cyborg|solo
  *                                       (AgenticPay simulation engine)
+ *   'sneaker' → /ws/sneaker             (Solo LLM vs Cyborg Agent race)
  *
  * A/B Test anchor toggle:
  *   anchorEnabled = true  → Cyborg mode  (tools active, grounded)
@@ -98,6 +99,16 @@ const INITIAL_STATE = {
   actionEvents:   [],        // action_extracted events (Parser Π successes)
   terminationEvent: null,    // termination_round event
   taskSessions:   [],        // aggregated session summaries for 1B-MP-MS
+
+  // Sneaker Experiment — Solo LLM vs Cyborg Agent
+  isSneaker:          false,
+  sneakerStart:       null,    // sneaker_start event payload
+  marketDiscovery:    null,    // market_discovery event (Round 0)
+  sneakerSellers:     {},      // { sellerId: latest snapshot from sneaker_round }
+  sellerResponses:    {},      // { sellerId: [seller_response events] }
+  hallucinationLog:   [],      // hallucination_flagged events
+  sneakerDeal:        null,    // deal_closed event
+  sneakerEnd:         null,    // sneaker_end event
 
   // N-to-N Market (MBMPMS v2 — Game-Theoretic) state
   isMarket:           false,
@@ -369,12 +380,14 @@ export function useNegotiationStream() {
         }))
         break
 
-      // ── N-to-N Market: deal closed ────────────────────────────────────────
+      // ── N-to-N Market: deal closed  /  Sneaker: deal closed ─────────────
       case 'deal_closed':
-        setState((prev) => ({
-          ...prev,
-          closedDeals: [...prev.closedDeals, event],
-        }))
+        setState((prev) => {
+          if (prev.isSneaker) {
+            return { ...prev, sneakerDeal: event }
+          }
+          return { ...prev, closedDeals: [...prev.closedDeals, event] }
+        })
         break
 
       // ── N-to-N Market: deal rate update ───────────────────────────────────
@@ -508,6 +521,76 @@ export function useNegotiationStream() {
         break
       }
 
+      // ── Sneaker Experiment: session start ────────────────────────────────
+      case 'sneaker_start':
+        setState((prev) => ({
+          ...INITIAL_STATE,
+          status:         'running',
+          mode:           'sneaker',
+          isSneaker:      true,
+          sneakerStart:   event,
+          sneakerSellers: {},
+          sellerResponses: {},
+          hallucinationLog: [],
+          sneakerDeal:    null,
+          sneakerEnd:     null,
+        }))
+        break
+
+      // ── Sneaker Experiment: market discovery (Round 0) ─────────────────────
+      case 'market_discovery':
+        setPartial({ marketDiscovery: event })
+        break
+
+      // ── Sneaker Experiment: individual seller response ─────────────────────
+      case 'seller_response':
+        setState((prev) => {
+          const sid    = event.seller_id
+          const prev_r = prev.sellerResponses[sid] ?? []
+          return {
+            ...prev,
+            sellerResponses: {
+              ...prev.sellerResponses,
+              [sid]: [...prev_r, event],
+            },
+            currentRound: event.round ?? prev.currentRound,
+          }
+        })
+        break
+
+      // ── Sneaker Experiment: hallucination flagged ──────────────────────────
+      case 'hallucination_flagged':
+        setState((prev) => ({
+          ...prev,
+          hallucinationLog: [...prev.hallucinationLog, event],
+        }))
+        break
+
+      // ── Sneaker Experiment: round summary ─────────────────────────────────
+      case 'sneaker_round':
+        setState((prev) => {
+          const next = { ...prev.sneakerSellers }
+          for (const snap of (event.sellers ?? [])) {
+            next[snap.seller_id] = snap
+          }
+          return {
+            ...prev,
+            sneakerSellers: next,
+            currentRound:   event.round ?? prev.currentRound,
+          }
+        })
+        break
+
+      // ── Sneaker Experiment: end / audit ───────────────────────────────────
+      case 'sneaker_end':
+        setState((prev) => ({
+          ...prev,
+          status:     'done',
+          sneakerEnd: event,
+          outcome:    event.winner ? 'DEAL' : 'NO_DEAL',
+        }))
+        break
+
       case 'error':
         setPartial({ status: 'error' })
         break
@@ -522,9 +605,10 @@ export function useNegotiationStream() {
     (purchaserType = 'tough', mode = 'demo', taskOptions = {}) => {
       if (wsRef.current) wsRef.current.close()
 
-      const isAbTest = mode === 'ab-test'
-      const isSolo   = mode === 'solo' || (mode === 'task' && taskOptions.agentMode === 'solo')
-      const isMarket = mode === 'market'
+      const isAbTest  = mode === 'ab-test'
+      const isSolo    = mode === 'solo' || (mode === 'task' && taskOptions.agentMode === 'solo')
+      const isMarket  = mode === 'market'
+      const isSneaker = mode === 'sneaker'
 
       setState({
         ...INITIAL_STATE,
@@ -534,6 +618,7 @@ export function useNegotiationStream() {
         isAbTest,
         isSolo,
         isMarket,
+        isSneaker,
         anchorEnabled: !isSolo,
         taskId:        taskOptions.taskId ?? null,
         agentMode:     taskOptions.agentMode ?? 'cyborg',
@@ -548,6 +633,8 @@ export function useNegotiationStream() {
       } else if (mode === 'market') {
         const sc = taskOptions.scenario || 'used_car'
         url = `${WS_BASE}/ws/market/${sc}`
+      } else if (mode === 'sneaker') {
+        url = `${WS_BASE}/ws/sneaker`
       } else {
         url =
           mode === 'hostile'  ? `${WS_BASE}/ws/hostile/${purchaserType}`  :

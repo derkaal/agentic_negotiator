@@ -967,6 +967,59 @@ async def market_config():
 
 
 # ---------------------------------------------------------------------------
+# Sneaker Experiment — Solo LLM vs Cyborg Agent
+# ---------------------------------------------------------------------------
+
+try:
+    from sneaker_experiment import run_sneaker_experiment
+    _SNEAKER_AVAILABLE = True
+except Exception as _snk_err:  # noqa: BLE001
+    log.warning("Sneaker experiment unavailable: %s", _snk_err)
+    _SNEAKER_AVAILABLE = False
+
+
+@app.websocket("/ws/sneaker")
+async def websocket_sneaker(websocket: WebSocket):
+    """
+    Run the Solo LLM vs Cyborg Agent sneaker experiment and stream events.
+
+    Event types:
+      sneaker_start       — scenario config, hypothesis, hallucination schedule
+      market_discovery    — Round 0 opening asks, real-time market average
+      seller_response     — per seller per round: price, narrative, tool calls
+      hallucination_flagged — type, penalty, description
+      sneaker_round       — round summary with all seller snapshots
+      deal_closed         — winner, deal price, welfare, AgenticPay scores
+      sneaker_end         — rankings, counterfactuals, superiority verdicts
+    """
+    await websocket.accept()
+    log.info("Sneaker experiment WS connected")
+
+    if not _SNEAKER_AVAILABLE:
+        await websocket.send_text(json.dumps({
+            "type": "error",
+            "message": "Sneaker experiment not available (import error).",
+        }))
+        await websocket.close()
+        return
+
+    try:
+        async for event in run_sneaker_experiment():
+            await websocket.send_text(json.dumps(event))
+            await asyncio.sleep(0)
+            if event.get("type") == "sneaker_end":
+                break
+    except WebSocketDisconnect:
+        log.info("Sneaker WS disconnected")
+    except Exception as exc:  # noqa: BLE001
+        log.exception("Sneaker WS error: %s", exc)
+        try:
+            await websocket.send_text(json.dumps({"type": "error", "message": str(exc)}))
+        except Exception:
+            pass
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 

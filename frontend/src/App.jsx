@@ -26,6 +26,7 @@ import DealSummary from './components/DealSummary'
 import DeceptionAlertLog, { DeceptionFlash } from './components/DeceptionAlert'
 import HallucinationMonitor, { UngroundedBanner } from './components/HallucinationMonitor'
 import MarketOverview from './components/MarketOverview'
+import SneakerRace from './components/SneakerRace'
 import PriceOverflowAlert from './components/PriceOverflowAlert'
 import ProviderBoard from './components/ProviderBoard'
 import ScorePanel from './components/ScorePanel'
@@ -53,6 +54,10 @@ export default function App() {
     // AgenticPay task mode
     taskId, agentMode,
     agenticpayScore, overflowEvents, actionEvents, terminationEvent,
+    // Sneaker Experiment
+    isSneaker,
+    sneakerStart, marketDiscovery, sneakerSellers, sellerResponses,
+    hallucinationLog, sneakerDeal, sneakerEnd,
     // N-to-N Market
     isMarket,
     marketScenario, marketBuyers, marketSellers,
@@ -74,7 +79,7 @@ export default function App() {
     setActiveMode(m)
     if (m === 'solo') {
       setAnchorEnabled(false)
-    } else if (m !== 'ab-test' && m !== 'task' && m !== 'market') {
+    } else if (m !== 'ab-test' && m !== 'task' && m !== 'market' && m !== 'sneaker') {
       setAnchorEnabled(true)
     }
   }, [setAnchorEnabled])
@@ -96,7 +101,7 @@ export default function App() {
       ? convergenceHistory[convergenceHistory.length - 1].provider_name
       : undefined
 
-  const maxRounds = isHostile ? 3 : isAbTest ? 3 : isTask ? 10 : isMarket ? 15 : 6
+  const maxRounds = isHostile ? 3 : isAbTest ? 3 : isTask ? 10 : isMarket ? 15 : isSneaker ? 10 : 6
 
   // ── Shield explainer cards ─────────────────────────────────────────────
   const STANDARD_SHIELDS = [
@@ -142,7 +147,16 @@ export default function App() {
       desc: 'AgenticPay Algorithm 1 aggregated across all closed deals. Higher deal rate + faster convergence = higher market welfare score (D=30, W=55, E=15, γ=0.99).' },
   ]
 
-  const shields = isMarket ? MARKET_SHIELDS : isTask ? TASK_SHIELDS : isAbTest ? AB_TEST_SHIELDS : isHostile ? HOSTILE_SHIELDS : STANDARD_SHIELDS
+  const SNEAKER_SHIELDS = [
+    { icon: '🔴', title: 'Solo LLM (QuickSole)', color: 'border-red-500/40 bg-red-950/20',
+      desc: 'Raw ClaudeHaikuLLM — no tools. Produces format failures, floor violations (price below σ_j), and phantom concessions at 3.2× normal rate. Demonstrates economic irrationality.' },
+    { icon: '🟡', title: 'Cyborg A — Competitive-Cooperative', color: 'border-amber-500/40 bg-amber-950/20',
+      desc: '"LLMs at the Bargaining Table" strategy. Anchors aggressively (8% concession) then switches to cooperative (22%) when gap < $60. MarginValidator + UtilityCalculator before every response.' },
+    { icon: '🔵', title: 'Cyborg B — OG-Narrator', color: 'border-blue-500/40 bg-blue-950/20',
+      desc: '"Measuring Bargaining Abilities of LLMs" strategy. Deterministic OfferGenerator computes the price; LLM only narrates. Zero numeric hallucination by design. Closes first.' },
+  ]
+
+  const shields = isSneaker ? SNEAKER_SHIELDS : isMarket ? MARKET_SHIELDS : isTask ? TASK_SHIELDS : isAbTest ? AB_TEST_SHIELDS : isHostile ? HOSTILE_SHIELDS : STANDARD_SHIELDS
 
   return (
     <div className="min-h-screen bg-war-bg text-gray-200 flex flex-col">
@@ -181,7 +195,7 @@ export default function App() {
               with parallel negotiation and market-switching — go beyond the 1-on-1 baseline.
             </p>
 
-            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 mt-6 text-left max-w-5xl mx-auto">
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-7 gap-3 mt-6 text-left max-w-5xl mx-auto">
               {[
                 { mode: 'demo',    icon: '🎬', title: 'Demo',
                   desc: 'Scripted 1-on-1. No API key.',
@@ -202,6 +216,9 @@ export default function App() {
                   desc: '3×3 MBMPMS — parallel + switching.',
                   cls: 'border-emerald-600/50 hover:border-emerald-500',
                   taskOptions: { scenario: 'used_car' } },
+                { mode: 'sneaker', icon: '👟', title: 'Sneaker',
+                  desc: 'Solo LLM vs Cyborg Agent race.',
+                  cls: 'border-red-600/50 hover:border-red-500' },
               ].map(({ mode: m, icon, title, desc, cls, taskOptions }) => (
                 <button
                   key={m}
@@ -307,8 +324,8 @@ export default function App() {
           </div>
         )}
 
-        {/* ── Charts row (not shown in A/B Test, Task, or Market) ───────── */}
-        {!isAbTest && !isTask && !isMarket && (status !== 'idle' || radarData.length > 0) && (
+        {/* ── Charts row (not shown in A/B Test, Task, Market, or Sneaker) ── */}
+        {!isAbTest && !isTask && !isMarket && !isSneaker && (status !== 'idle' || radarData.length > 0) && (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
             <div className={clsx(
               'border rounded-xl p-5 h-72',
@@ -455,6 +472,23 @@ export default function App() {
               </div>
             )}
           </>
+        )}
+
+        {/* ══════════════════════════════════════════════════════════════
+            SNEAKER RACE LAYOUT — Solo LLM vs Cyborg A vs Cyborg B
+            3-lane race + Market Discovery + Rankings + Verdict
+            ════════════════════════════════════════════════════════════ */}
+        {isSneaker && (sneakerStart || marketDiscovery || sneakerEnd) && (
+          <SneakerRace
+            sneakerStart={sneakerStart}
+            marketDiscovery={marketDiscovery}
+            sneakerSellers={sneakerSellers}
+            sellerResponses={sellerResponses}
+            hallucinationLog={hallucinationLog}
+            sneakerDeal={sneakerDeal}
+            sneakerEnd={sneakerEnd}
+            currentRound={currentRound}
+          />
         )}
 
         {/* ══════════════════════════════════════════════════════════════
@@ -671,7 +705,7 @@ export default function App() {
         {/* ══════════════════════════════════════════════════════════════
             STANDARD / SOLO FEED ROW
             ════════════════════════════════════════════════════════════ */}
-        {!isAbTest && !isTask && !isMarket && thoughts.length > 0 && (
+        {!isAbTest && !isTask && !isMarket && !isSneaker && thoughts.length > 0 && (
           <div className={clsx(
             'grid gap-6',
             isHostile || isSolo ? 'grid-cols-1 lg:grid-cols-2' : 'grid-cols-1',
@@ -713,7 +747,7 @@ export default function App() {
         )}
 
         {/* ── Deal summary (standard / solo modes) ───────────────────── */}
-        {!isAbTest && !isTask && !isMarket && outcome && (
+        {!isAbTest && !isTask && !isMarket && !isSneaker && outcome && (
           <DealSummary
             outcome={outcome}
             deal={deal}

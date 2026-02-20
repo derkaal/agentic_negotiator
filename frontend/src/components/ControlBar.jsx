@@ -37,11 +37,12 @@ export default function ControlBar({
   onModeChange,
   onAnchorToggle,
 }) {
-  const isRunning = status === 'running' || status === 'connecting'
-  const isAbTest  = mode === 'ab-test'
-  const isSolo    = mode === 'solo'
-  const isTask    = mode === 'task'
-  const isMarket  = mode === 'market'
+  const isRunning  = status === 'running' || status === 'connecting'
+  const isAbTest   = mode === 'ab-test'
+  const isSolo     = mode === 'solo'
+  const isTask     = mode === 'task'
+  const isMarket   = mode === 'market'
+  const isSneaker  = mode === 'sneaker'
 
   return (
     <header className="bg-war-panel border-b border-war-border px-6 py-3">
@@ -88,6 +89,7 @@ export default function ControlBar({
               { id: 'ab-test', label: '⚗️ A/B Test', activeClass: 'bg-violet-700 text-white' },
               { id: 'task',    label: '⚖ Task',    activeClass: 'bg-cyan-700   text-white' },
               { id: 'market',  label: '🏪 Market',  activeClass: 'bg-emerald-700 text-white' },
+              { id: 'sneaker', label: '👟 Sneaker', activeClass: 'bg-red-700    text-white' },
             ].map(({ id, label, activeClass }) => (
               <button
                 key={id}
@@ -105,8 +107,8 @@ export default function ControlBar({
             ))}
           </div>
 
-          {/* ── Anchor Toggle ── (shown for all modes except hostile, ab-test, task, market) */}
-          {mode !== 'hostile' && mode !== 'ab-test' && mode !== 'task' && mode !== 'market' && (
+          {/* ── Anchor Toggle ── (shown for all modes except hostile, ab-test, task, market, sneaker) */}
+          {mode !== 'hostile' && mode !== 'ab-test' && mode !== 'task' && mode !== 'market' && mode !== 'sneaker' && (
             <div className="flex items-center gap-2 flex-shrink-0">
               <span className="text-xs text-gray-500 font-mono">Anchor:</span>
               <button
@@ -169,6 +171,16 @@ export default function ControlBar({
             </div>
           )}
 
+          {/* Sneaker mode indicator */}
+          {isSneaker && (
+            <div className="flex items-center gap-2 flex-shrink-0">
+              <span className="bg-red-900/60 border border-red-600/50 text-red-300 text-xs font-bold px-2 py-1 rounded font-mono animate-pulse">
+                👟 SNEAKER RACE
+              </span>
+              <span className="text-red-400 text-xs font-mono">Solo vs Cyborg A vs Cyborg B</span>
+            </div>
+          )}
+
           {/* Solo mode indicator */}
           {isSolo && (
             <div className="flex items-center gap-1.5 flex-shrink-0">
@@ -177,8 +189,8 @@ export default function ControlBar({
             </div>
           )}
 
-          {/* Purchaser type toggle (hidden in market mode — has its own 3 buyers) */}
-          {!isMarket && (
+          {/* Purchaser type toggle (hidden in market/sneaker mode) */}
+          {!isMarket && !isSneaker && (
             <div className="flex rounded-lg border border-war-border overflow-hidden flex-shrink-0">
               {['tough', 'emergency'].map((type) => (
                 <button
@@ -202,7 +214,10 @@ export default function ControlBar({
 
           {/* Start button */}
           <button
-            onClick={() => onStart(purchaserType, mode, isMarket ? { scenario: 'used_car' } : undefined)}
+            onClick={() => onStart(
+              purchaserType, mode,
+              isMarket ? { scenario: 'used_car' } : undefined,
+            )}
             disabled={isRunning}
             className={clsx(
               'px-5 py-2 rounded-lg text-xs font-bold uppercase tracking-wider transition-all whitespace-nowrap flex-shrink-0',
@@ -220,6 +235,8 @@ export default function ControlBar({
                 ? 'bg-cyan-700 text-white hover:bg-cyan-600 active:scale-95'
                 : mode === 'market'
                 ? 'bg-emerald-700 text-white hover:bg-emerald-600 active:scale-95'
+                : mode === 'sneaker'
+                ? 'bg-red-700 text-white hover:bg-red-600 active:scale-95'
                 : 'bg-war-purple text-white hover:bg-purple-500 active:scale-95'
             )}
           >
@@ -237,6 +254,8 @@ export default function ControlBar({
               ? '⚖ Run Task'
               : mode === 'market'
               ? '🏪 Run Market'
+              : mode === 'sneaker'
+              ? '👟 Run Sneaker'
               : '▶ Play Demo'
             }
           </button>
