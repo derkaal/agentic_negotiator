@@ -12,6 +12,12 @@
  *   [TRICK_ATTEMPT]      — the deceptive offer being made (orange)
  *   [DETECTION]          — shield catches the trick       (amber)
  *   [VETO]               — transaction blocked            (red bold)
+ *
+ * A/B Test tags (solo/cyborg modes):
+ *   [INTERNAL_MATH]      — solo agent's hallucinated estimate   (orange-red)
+ *   [SOCIAL_PRESSURE]    — provider pressure tactic detected    (amber)
+ *   [HALLUCINATION]      — solo agent accepting bad deal        (red bold italic)
+ *   agent_type badge     — shows [SOLO] or [CYBORG] prefix
  */
 
 import React, { useEffect, useRef } from 'react'
@@ -28,6 +34,10 @@ const TAG_STYLES = {
   TRICK_ATTEMPT:      'bg-orange-950/70  text-orange-300  border border-orange-700/60',
   DETECTION:          'bg-amber-900/60   text-amber-300   border border-amber-600/60',
   VETO:               'bg-red-900/80     text-red-200     border border-red-500/80',
+  // A/B Test — Solo Agent
+  INTERNAL_MATH:      'bg-orange-900/60  text-orange-200  border border-orange-600/60',
+  SOCIAL_PRESSURE:    'bg-amber-900/50   text-amber-300   border border-amber-600/50',
+  HALLUCINATION:      'bg-red-900/70     text-red-200     border border-red-500/70',
 }
 
 const ACTOR_COLORS = {
@@ -59,28 +69,48 @@ const ADVERSARIAL_TAGS = new Set([
   'ADVERSARIAL_INTENT', 'TRICK_ATTEMPT', 'DETECTION', 'VETO',
 ])
 
+const SOLO_TAGS = new Set([
+  'INTERNAL_MATH', 'SOCIAL_PRESSURE', 'HALLUCINATION',
+])
+
+const AGENT_TYPE_BADGES = {
+  solo:   { label: 'SOLO',   cls: 'bg-orange-900/60 text-orange-300 border border-orange-700/50' },
+  cyborg: { label: 'CYBORG', cls: 'bg-cyan-900/60 text-cyan-300 border border-cyan-700/50' },
+}
+
 function ThoughtEntry({ thought }) {
   const isJson =
-    thought.tag === 'MATH_RESULT' && thought.content.trim().startsWith('{')
+    thought.tag === 'MATH_RESULT' && thought.content?.trim().startsWith('{')
   const isAdversarial = ADVERSARIAL_TAGS.has(thought.tag)
+  const isSoloTag     = SOLO_TAGS.has(thought.tag)
+  const agentBadge    = thought.agentType ? AGENT_TYPE_BADGES[thought.agentType] : null
 
-  let displayContent = thought.content
+  let displayContent = thought.content ?? ''
   if (isJson) {
     try {
       displayContent = JSON.stringify(JSON.parse(thought.content), null, 2)
     } catch { /* keep as-is */ }
   }
 
-  const isVeto   = thought.tag === 'VETO' || thought.content.includes('HALTED')
-  const isAccept = thought.content.startsWith('ACCEPT') || thought.content.includes('DEAL CLOSED')
+  const isVeto   = thought.tag === 'VETO' || displayContent.includes('HALTED') || displayContent.includes('CYBORG VETO')
+  const isAccept = displayContent.startsWith('ACCEPT') || displayContent.includes('DEAL CLOSED')
+  const isHallucination = thought.tag === 'INTERNAL_MATH' || thought.tag === 'HALLUCINATION'
 
   return (
     <div className={clsx(
       'animate-fade-in border-b pb-3 mb-3 last:border-0',
-      isAdversarial ? 'border-red-900/50' : 'border-war-border/40',
+      isAdversarial  ? 'border-red-900/50'    :
+      isSoloTag      ? 'border-orange-900/40' :
+                       'border-war-border/40',
     )}>
       {/* Header row */}
       <div className="flex items-center gap-2 mb-1.5 flex-wrap">
+        {/* Agent type badge (A/B test only) */}
+        {agentBadge && (
+          <span className={clsx('text-xs font-black px-1.5 py-0.5 rounded', agentBadge.cls)}>
+            [{agentBadge.label}]
+          </span>
+        )}
         <span className={clsx('text-xs font-bold', actorColor(thought.actor))}>
           {actorLabel(thought.actor)}
         </span>
@@ -100,6 +130,11 @@ function ThoughtEntry({ thought }) {
         {isAccept && (
           <span className="text-xs font-bold text-war-green">✓ DEAL</span>
         )}
+        {isHallucination && (
+          <span className="text-xs font-bold text-orange-400 animate-pulse">
+            ⚠️ UNGROUNDED
+          </span>
+        )}
       </div>
 
       {/* Content */}
@@ -115,11 +150,14 @@ function ThoughtEntry({ thought }) {
       ) : (
         <p className={clsx(
           'text-xs leading-relaxed font-mono',
-          thought.tag === 'ADVERSARIAL_INTENT' ? 'text-red-300 italic' :
-          thought.tag === 'TRICK_ATTEMPT'      ? 'text-orange-300' :
-          thought.tag === 'DETECTION'          ? 'text-amber-300 font-semibold' :
-          isVeto                               ? 'text-red-200 font-bold' :
-          isAccept                             ? 'text-emerald-300' :
+          thought.tag === 'ADVERSARIAL_INTENT' ? 'text-red-300 italic'           :
+          thought.tag === 'TRICK_ATTEMPT'      ? 'text-orange-300'               :
+          thought.tag === 'DETECTION'          ? 'text-amber-300 font-semibold'  :
+          thought.tag === 'INTERNAL_MATH'      ? 'text-orange-200/80 italic'     :
+          thought.tag === 'SOCIAL_PRESSURE'    ? 'text-amber-300'                :
+          thought.tag === 'HALLUCINATION'      ? 'text-red-200 font-bold italic' :
+          isVeto                               ? 'text-red-200 font-bold'        :
+          isAccept                             ? 'text-emerald-300'              :
                                                  'text-gray-300'
         )}>
           {displayContent}
@@ -129,20 +167,36 @@ function ThoughtEntry({ thought }) {
   )
 }
 
-export default function ThoughtFeed({ thoughts = [] }) {
+export default function ThoughtFeed({ thoughts = [], label = 'Agent Thought Feed', agentMode = null }) {
   const bottomRef = useRef(null)
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [thoughts.length])
 
+  const headerColor =
+    agentMode === 'solo'   ? 'text-orange-400' :
+    agentMode === 'cyborg' ? 'text-cyan-400'   :
+                             'text-war-accent'
+
+  const dotColor =
+    agentMode === 'solo'   ? 'bg-orange-400' :
+    agentMode === 'cyborg' ? 'bg-cyan-400'   :
+                             'bg-war-green'
+
   return (
     <div className="flex flex-col h-full">
       <div className="flex items-center gap-2 mb-3">
-        <div className="w-2 h-2 rounded-full bg-war-green animate-pulse" />
-        <h2 className="text-war-accent text-xs font-bold uppercase tracking-widest">
-          Agent Thought Feed
+        <div className={clsx('w-2 h-2 rounded-full animate-pulse', dotColor)} />
+        <h2 className={clsx('text-xs font-bold uppercase tracking-widest', headerColor)}>
+          {label}
         </h2>
+        {agentMode === 'solo' && (
+          <span className="text-orange-500 text-xs font-mono">[NO ANCHOR]</span>
+        )}
+        {agentMode === 'cyborg' && (
+          <span className="text-cyan-600 text-xs font-mono">[GROUNDED]</span>
+        )}
         <span className="ml-auto text-gray-600 text-xs">{thoughts.length} events</span>
       </div>
 

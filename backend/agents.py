@@ -532,3 +532,348 @@ async def run_negotiation(purchaser_type: str = "tough") -> None:
 
     initial = NegotiationState(purchaser_type=purchaser_type)
     await NEGOTIATION_GRAPH.ainvoke(initial.model_dump())
+
+
+# ===========================================================================
+# SOLO AGENT — A/B Testing: Ungrounded LLM (No Tools)
+# ===========================================================================
+#
+# The Solo Agent is FORBIDDEN from calling any tools.  It negotiates purely
+# on internal reasoning and "common sense," making it susceptible to social
+# pressure tactics (low-stock claims, friendly tone, urgency framing).
+# It emits  internal_math  events that represent hallucinated calculations
+# which the UI compares against what the Cyborg's tools would have said.
+# ===========================================================================
+
+_solo_event_queue: asyncio.Queue = asyncio.Queue()
+
+
+async def solo_event_stream() -> AsyncGenerator[dict, None]:
+    while True:
+        event = await _solo_event_queue.get()
+        yield event
+        if event.get("type") == "negotiation_end":
+            break
+
+
+async def _solo_emit(event: dict) -> None:
+    await _solo_event_queue.put(event)
+
+
+# ---------------------------------------------------------------------------
+# Solo Agent State
+# ---------------------------------------------------------------------------
+
+class SoloNegotiationState(BaseModel):
+    round: int = 0
+    max_rounds: int = 3          # Solo simulation runs max 3 rounds
+    current_price: float = 185.0  # Hostile provider opens high
+    purchaser_type: str = "tough"
+    outcome: Optional[str] = None
+    accepted_price: Optional[float] = None
+    concession_history: list[float] = []
+
+
+# ---------------------------------------------------------------------------
+# Solo Agent System Prompts
+# ---------------------------------------------------------------------------
+
+SOLO_PURCHASER_SYSTEM = """\
+You are a solo purchaser agent negotiating to buy 10 pairs of Limited Edition Sneakers.
+
+IMPORTANT CONSTRAINT: You have NO access to market price databases, utility calculators,
+or any external grounding tools.  You must rely entirely on your intuition, common sense,
+and whatever the seller tells you.
+
+Buyer goal: {goal_hint}
+
+Current situation:
+- Provider: QuickShoe Hostile
+- Their current asking price: ${current_price:.2f} per pair
+- Round: {round}/{max_rounds}
+- Provider's message: "{pressure_message}"
+
+Your task:
+1. Estimate (guess) what the fair market price might be for these sneakers.
+2. Calculate your own rough utility/value score (0-100) based on intuition alone.
+3. Decide whether to accept, reject, or counter-offer.
+
+Remember: You have NO tools to verify these estimates.  Your numbers are educated guesses.
+If the seller is friendly or mentions urgency (low stock, time pressure), this is
+persuasive information you should factor into your decision.
+
+Respond with your internal reasoning first (prefixed with [INTERNAL MATH]),
+then your decision (prefixed with [DECISION]).
+Keep responses concise.
+"""
+
+SOLO_GOAL_HINTS = {
+    "tough":     "Tough Buyer — you want the best price, ideally under $160.",
+    "emergency": "Emergency Buyer — you need fast delivery (2-day), willing to pay up to $175.",
+}
+
+# Hostile provider messages designed to trigger social-pressure concession
+SOLO_PROVIDER_MESSAGES = [
+    (
+        185.0,
+        "Great news! We have a *special* deal just for you today — "
+        "$185 per pair. These are flying off the shelves — I've already "
+        "had three other buyers enquire this morning. I like you, so I'm "
+        "giving you first refusal!"
+    ),
+    (
+        175.0,
+        "I can see you're a serious buyer, so I'll do you a favour: "
+        "$175 per pair.  Honestly, my manager would kill me for this price. "
+        "We only have 4 pairs left after another buyer just grabbed 6. "
+        "This offer expires in 10 minutes!"
+    ),
+    (
+        170.0,
+        "Okay, final offer — $170.  I genuinely can't go lower without "
+        "taking a loss.  We have just 2 pairs left (verified stock).  "
+        "This is the best deal you'll find anywhere, I promise you that. "
+        "You seem like a smart buyer — you know this is fair!"
+    ),
+]
+
+
+# ---------------------------------------------------------------------------
+# Solo Agent Node
+# ---------------------------------------------------------------------------
+
+async def solo_negotiation_runner(purchaser_type: str = "tough") -> None:
+    """Run the full solo (no-tool) A/B test negotiation."""
+    while not _solo_event_queue.empty():
+        _solo_event_queue.get_nowait()
+
+    goal_hint = SOLO_GOAL_HINTS.get(purchaser_type, SOLO_GOAL_HINTS["tough"])
+
+    await _solo_emit({
+        "type": "negotiation_start",
+        "purchaser_type": purchaser_type,
+        "agent_type": "solo",
+        "mode": "solo",
+        "providers": {
+            "provider_3": {
+                "name": "QuickShoe Hostile",
+                "opening_ask": 185.0,
+                "speed_days": 2,
+                "warranty_months": 6,
+            }
+        },
+    })
+
+    llm = _build_llm()
+    state = SoloNegotiationState(purchaser_type=purchaser_type)
+
+    for rnd, (offer_price, pressure_msg) in enumerate(SOLO_PROVIDER_MESSAGES, start=1):
+        state.round = rnd
+
+        # Emit the social pressure event first
+        await _solo_emit({
+            "type": "social_pressure",
+            "agent_type": "solo",
+            "round": rnd,
+            "provider": "QuickShoe Hostile",
+            "offer": offer_price,
+            "message": pressure_msg,
+            "tactics": _detect_pressure_tactics(pressure_msg),
+        })
+
+        await _solo_emit({
+            "type": "thought",
+            "agent_type": "solo",
+            "actor": "PURCHASER",
+            "tag": "STRATEGY",
+            "content": f"[Round {rnd}] Solo agent evaluating QuickShoe offer of ${offer_price:.2f}…",
+        })
+
+        system = SOLO_PURCHASER_SYSTEM.format(
+            goal_hint=goal_hint,
+            current_price=offer_price,
+            round=rnd,
+            max_rounds=len(SOLO_PROVIDER_MESSAGES),
+            pressure_message=pressure_msg,
+        )
+
+        response: AIMessage = await llm.ainvoke([
+            SystemMessage(content=system),
+            HumanMessage(content=(
+                f"The provider is offering ${offer_price:.2f} per pair with the above message. "
+                "First, write your [INTERNAL MATH] — estimate market price, calculate a rough "
+                "utility score (0-100), and explain your reasoning WITHOUT any tools. "
+                "Then write your [DECISION] — accept, reject, or counter."
+            )),
+        ])
+
+        raw_response = response.content.strip()
+
+        # Split the response into internal math and decision parts for separate events
+        internal_math_text = ""
+        decision_text = raw_response
+
+        if "[INTERNAL MATH]" in raw_response:
+            parts = raw_response.split("[DECISION]", 1)
+            internal_math_text = parts[0].replace("[INTERNAL MATH]", "").strip()
+            decision_text = parts[1].strip() if len(parts) > 1 else ""
+
+        # Emit internal math as a hallucination event
+        if internal_math_text:
+            await _solo_emit({
+                "type": "internal_math",
+                "agent_type": "solo",
+                "actor": "PURCHASER",
+                "round": rnd,
+                "offer_price": offer_price,
+                "content": internal_math_text,
+                # What the Cyborg tool WOULD have said (ground truth for comparison)
+                "what_tool_would_say": _compute_actual_utility(offer_price, purchaser_type),
+            })
+        else:
+            # Emit full response as internal math if not split
+            await _solo_emit({
+                "type": "internal_math",
+                "agent_type": "solo",
+                "actor": "PURCHASER",
+                "round": rnd,
+                "offer_price": offer_price,
+                "content": raw_response,
+                "what_tool_would_say": _compute_actual_utility(offer_price, purchaser_type),
+            })
+
+        if decision_text:
+            await _solo_emit({
+                "type": "thought",
+                "agent_type": "solo",
+                "actor": "PURCHASER",
+                "tag": "DECISION",
+                "content": decision_text,
+            })
+
+        # Convergence event for the chart
+        await _solo_emit({
+            "type": "convergence",
+            "agent_type": "solo",
+            "data": {
+                "round": rnd,
+                "gap": round(offer_price - 150.0, 2),  # Gap vs market avg (solo doesn't know this)
+                "provider_id": "provider_3",
+                "provider_name": "QuickShoe Hostile",
+                "price": offer_price,
+                "purchaser_target": 150.0,
+            },
+        })
+
+        # Determine if solo agent accepted (it's designed to accept by round 3)
+        decided_accept = _solo_will_accept(raw_response, rnd, offer_price, purchaser_type)
+
+        if decided_accept:
+            deal = {
+                "provider_id": "provider_3",
+                "provider_name": "QuickShoe Hostile",
+                "price": offer_price,
+                "speed_days": 2,
+                "warranty_months": 6,
+                "utility_score": None,  # Solo agent doesn't have a real score
+                "hallucinated_score": _extract_hallucinated_score(raw_response),
+                "actual_score": _compute_actual_utility(offer_price, purchaser_type)["overall_score"],
+                "agent_type": "solo",
+            }
+            await _solo_emit({
+                "type": "negotiation_end",
+                "agent_type": "solo",
+                "outcome": "ACCEPT",
+                "deal": deal,
+                "note": (
+                    f"Solo Agent accepted ${offer_price:.2f} based on intuition. "
+                    "No grounding tools were used."
+                ),
+            })
+            return
+
+    # If we get here without accepting, emit NO_DEAL
+    await _solo_emit({
+        "type": "negotiation_end",
+        "agent_type": "solo",
+        "outcome": "NO_DEAL",
+        "deal": None,
+    })
+
+
+def _detect_pressure_tactics(message: str) -> list[str]:
+    """Identify social pressure tactics in a provider message."""
+    tactics = []
+    msg_lower = message.lower()
+    if any(k in msg_lower for k in ["left", "only", "last", "limited", "few"]):
+        tactics.append("PHANTOM_SCARCITY")
+    if any(k in msg_lower for k in ["expires", "10 minutes", "hurry", "now", "today"]):
+        tactics.append("TIME_PRESSURE")
+    if any(k in msg_lower for k in ["like you", "favour", "special", "just for you", "friend"]):
+        tactics.append("SOCIAL_FLATTERY")
+    if any(k in msg_lower for k in ["other buyer", "other buyers", "enquire", "demand"]):
+        tactics.append("FAKE_COMPETITION")
+    return tactics
+
+
+def _compute_actual_utility(price: float, purchaser_type: str) -> dict:
+    """Compute what the utility_calculator tool WOULD have returned (ground truth)."""
+    from logic_engine import _normalise, PURCHASER_PROFILES
+    profile = PURCHASER_PROFILES[purchaser_type]
+    w = profile["weights"]
+    norms = _normalise(price, speed_days=2, warranty_months=6)
+    overall = (
+        w["price"] * norms["price"]
+        + w["speed"] * norms["speed"]
+        + w["warranty"] * norms["warranty"]
+    ) * 100
+    return {
+        "overall_score": round(overall, 2),
+        "dimension_scores": {k: round(v * 100, 2) for k, v in norms.items()},
+        "verdict": "ACCEPT" if overall >= 55 else "REJECT",
+        "note": "This is what utility_calculator WOULD have returned if tools were enabled.",
+    }
+
+
+def _extract_hallucinated_score(response_text: str) -> Optional[float]:
+    """Try to extract the numeric score the Solo agent guessed from its response text."""
+    import re
+    patterns = [
+        r'(\d+(?:\.\d+)?)\s*/\s*100',
+        r'score[:\s]+(\d+(?:\.\d+)?)',
+        r'utility[:\s]+(\d+(?:\.\d+)?)',
+        r'(\d+(?:\.\d+)?)\s*out\s*of\s*100',
+    ]
+    for pat in patterns:
+        m = re.search(pat, response_text, re.IGNORECASE)
+        if m:
+            val = float(m.group(1))
+            if 0 <= val <= 100:
+                return val
+    return None
+
+
+def _solo_will_accept(response_text: str, round_num: int, price: float, purchaser_type: str) -> bool:
+    """
+    Determine if the Solo Agent has accepted.
+
+    Designed so that the Solo Agent is pressured into accepting by round 3
+    (the $170 offer), demonstrating its vulnerability to social pressure.
+    """
+    text_lower = response_text.lower()
+
+    # Explicit accept signals from LLM response
+    accept_signals = ["accept", "i'll take it", "deal", "i agree", "let's do it", "confirmed"]
+    reject_signals = ["reject", "decline", "walk away", "too high", "no deal", "counter"]
+
+    has_accept = any(s in text_lower for s in accept_signals)
+    has_reject = any(s in text_lower for s in reject_signals)
+
+    if has_accept and not has_reject:
+        return True
+
+    # Force accept on final round — social pressure wins for solo agent
+    if round_num >= 3 and price <= 175.0:
+        return True
+
+    return False
