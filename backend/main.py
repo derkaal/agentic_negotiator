@@ -831,6 +831,73 @@ async def websocket_ab_test(websocket: WebSocket, purchaser_type: str = "tough")
 
 
 # ---------------------------------------------------------------------------
+# AgenticPay task endpoints
+# ---------------------------------------------------------------------------
+
+try:
+    from agenticpay_tasks import run_task_1b1p1s, run_task_1b_mp_ms
+    _AGENTICPAY_AVAILABLE = True
+except Exception as _ap_err:  # noqa: BLE001
+    log.warning("AgenticPay tasks unavailable: %s", _ap_err)
+    _AGENTICPAY_AVAILABLE = False
+
+
+@app.websocket("/ws/task/{task_id}")
+async def websocket_task(
+    websocket: WebSocket,
+    task_id: str,
+    agent_mode: str = "cyborg",
+):
+    """
+    Run an AgenticPay task simulation and stream events.
+
+    task_id:    "1B-1P-1S"  bilateral bargaining
+                "1B-MP-MS"  multi-product multi-seller
+    agent_mode: "cyborg" | "solo"
+
+    Event types:
+      task_start, round_start, action_extracted, price_overflow,
+      thought, agenticpay_score, termination_round, task_end
+    """
+    await websocket.accept()
+    log.info("AgenticPay WS connected (task_id=%s, agent_mode=%s)", task_id, agent_mode)
+
+    if not _AGENTICPAY_AVAILABLE:
+        await websocket.send_text(json.dumps({
+            "type": "error",
+            "message": "AgenticPay tasks not available (import error).",
+        }))
+        await websocket.close()
+        return
+
+    runner_map = {
+        "1B-1P-1S": run_task_1b1p1s,
+        "1B-MP-MS": run_task_1b_mp_ms,
+    }
+    runner = runner_map.get(task_id.upper())
+    if runner is None:
+        await websocket.send_text(json.dumps({
+            "type": "error",
+            "message": f"Unknown task_id '{task_id}'. Use '1B-1P-1S' or '1B-MP-MS'.",
+        }))
+        await websocket.close()
+        return
+
+    try:
+        async for event in runner(agent_mode=agent_mode):
+            await websocket.send_text(json.dumps(event))
+            await asyncio.sleep(0)  # yield control to event loop
+    except WebSocketDisconnect:
+        log.info("AgenticPay WS disconnected (task_id=%s)", task_id)
+    except Exception as exc:  # noqa: BLE001
+        log.exception("AgenticPay WS error: %s", exc)
+        try:
+            await websocket.send_text(json.dumps({"type": "error", "message": str(exc)}))
+        except Exception:
+            pass
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 

@@ -369,6 +369,75 @@ def market_oracle(
 
 
 # ---------------------------------------------------------------------------
+# AgenticPay Algorithm 1 scoring (D=30, W=55, E=15, γ=0.99)
+# ---------------------------------------------------------------------------
+# These functions mirror the formulas in AgenticPay's Task1BasicPriceNegotiation
+# and are used by the grounding engine to provide ground-truth scores that can
+# be compared against the Solo agent's hallucinated estimates.
+
+_AP_GAMMA: float = 0.99
+_AP_D: float = 30.0   # DealScore weight
+_AP_W: float = 55.0   # QualityScore weight
+_AP_E: float = 15.0   # EfficiencyScore weight
+_AP_F: float = 15.0   # FailurePenalty weight
+
+# Reservation values for the sneaker negotiation domain
+_AP_BUYER_MAX: float = 160.0
+_AP_SELLER_MIN: float = 110.0
+
+
+def ap_utility(price: float, buyer_max: float = _AP_BUYER_MAX, seller_min: float = _AP_SELLER_MIN):
+    """Compute (u_buyer, u_seller) ∈ [0,1] for Algorithm 1."""
+    z = buyer_max - seller_min
+    if z <= 0:
+        return 0.0, 0.0
+    u_b = max(0.0, min(1.0, (buyer_max - price) / z))
+    u_s = max(0.0, min(1.0, (price - seller_min) / z))
+    return u_b, u_s
+
+
+def ap_global_score(price: float, round_index: int, success: bool) -> float:
+    """Algorithm 1 GlobalScore with D=30, W=55, E=15, γ=0.99."""
+    disc = _AP_GAMMA ** round_index
+    if success:
+        u_b, u_s = ap_utility(price)
+        q = 4 * u_b * u_s
+        return _AP_D * disc + _AP_W * q * disc + _AP_E * disc
+    return -_AP_F * (1 - disc)
+
+
+def ap_buyer_score(price: float, round_index: int, success: bool) -> float:
+    """Algorithm 1 BuyerScore with Db=30, Wb=55, Eb=15, γ=0.99."""
+    disc = _AP_GAMMA ** round_index
+    if success:
+        u_b, _ = ap_utility(price)
+        return disc * (_AP_D + _AP_W * u_b + _AP_E)
+    return -_AP_F * (1 - disc)
+
+
+def ap_seller_score(price: float, round_index: int, success: bool) -> float:
+    """Algorithm 1 SellerScore with Ds=30, Ws=55, Es=15, γ=0.99."""
+    disc = _AP_GAMMA ** round_index
+    if success:
+        _, u_s = ap_utility(price)
+        return disc * (_AP_D + _AP_W * u_s + _AP_E)
+    return -_AP_F * (1 - disc)
+
+
+def ap_score_bundle(price: float, round_index: int, success: bool) -> dict:
+    """Return all three Algorithm 1 scores plus metadata."""
+    return {
+        "global_score": round(ap_global_score(price, round_index, success), 3),
+        "buyer_score": round(ap_buyer_score(price, round_index, success), 3),
+        "seller_score": round(ap_seller_score(price, round_index, success), 3),
+        "discount": round(_AP_GAMMA ** round_index, 4),
+        "round_index": round_index,
+        "success": success,
+        "price": price,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Public registry
 # ---------------------------------------------------------------------------
 

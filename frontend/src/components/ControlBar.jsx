@@ -40,6 +40,7 @@ export default function ControlBar({
   const isRunning = status === 'running' || status === 'connecting'
   const isAbTest  = mode === 'ab-test'
   const isSolo    = mode === 'solo'
+  const isTask    = mode === 'task'
 
   return (
     <header className="bg-war-panel border-b border-war-border px-6 py-3">
@@ -84,6 +85,7 @@ export default function ControlBar({
               { id: 'hostile', label: '☠ Hostile', activeClass: 'bg-war-red    text-white' },
               { id: 'solo',    label: '🧠 Solo',    activeClass: 'bg-orange-600 text-white' },
               { id: 'ab-test', label: '⚗️ A/B Test', activeClass: 'bg-violet-700 text-white' },
+              { id: 'task',    label: '⚖ Task',    activeClass: 'bg-cyan-700   text-white' },
             ].map(({ id, label, activeClass }) => (
               <button
                 key={id}
@@ -101,8 +103,8 @@ export default function ControlBar({
             ))}
           </div>
 
-          {/* ── Anchor Toggle ── (shown for all modes except hostile) */}
-          {mode !== 'hostile' && mode !== 'ab-test' && (
+          {/* ── Anchor Toggle ── (shown for all modes except hostile, ab-test, task) */}
+          {mode !== 'hostile' && mode !== 'ab-test' && mode !== 'task' && (
             <div className="flex items-center gap-2 flex-shrink-0">
               <span className="text-xs text-gray-500 font-mono">Anchor:</span>
               <button
@@ -142,6 +144,16 @@ export default function ControlBar({
                 SOLO vs CYBORG
               </span>
               <span className="text-violet-400 text-xs font-mono">comparison active</span>
+            </div>
+          )}
+
+          {/* Task mode indicator */}
+          {isTask && (
+            <div className="flex items-center gap-2 flex-shrink-0">
+              <span className="bg-cyan-900/60 border border-cyan-600/50 text-cyan-300 text-xs font-bold px-2 py-1 rounded font-mono">
+                ⚖ AGENTICPAY
+              </span>
+              <span className="text-cyan-400 text-xs font-mono">Algorithm 1</span>
             </div>
           )}
 
@@ -190,6 +202,8 @@ export default function ControlBar({
                 ? 'bg-orange-600 text-white hover:bg-orange-500 active:scale-95'
                 : mode === 'ab-test'
                 ? 'bg-violet-700 text-white hover:bg-violet-600 active:scale-95'
+                : mode === 'task'
+                ? 'bg-cyan-700 text-white hover:bg-cyan-600 active:scale-95'
                 : 'bg-war-purple text-white hover:bg-purple-500 active:scale-95'
             )}
           >
@@ -203,6 +217,8 @@ export default function ControlBar({
               ? '🧠 Run Solo'
               : mode === 'ab-test'
               ? '⚗️ Run A/B Test'
+              : mode === 'task'
+              ? '⚖ Run Task'
               : '▶ Play Demo'
             }
           </button>

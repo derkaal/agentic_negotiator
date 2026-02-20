@@ -5,11 +5,13 @@
  * structured state for the War Room UI.
  *
  * Modes:
- *   'demo'    → /ws/demo/{type}      (scripted, no LLM key)
- *   'live'    → /ws/live/{type}      (real Claude Haiku tool-calling)
- *   'hostile' → /ws/hostile/{type}   (red-team adversarial simulation)
- *   'solo'    → /ws/solo/{type}      (ungrounded LLM — Anchor OFF)
- *   'ab-test' → /ws/ab-test/{type}   (scripted Solo vs Cyborg comparison)
+ *   'demo'    → /ws/demo/{type}         (scripted, no LLM key)
+ *   'live'    → /ws/live/{type}         (real Claude Haiku tool-calling)
+ *   'hostile' → /ws/hostile/{type}      (red-team adversarial simulation)
+ *   'solo'    → /ws/solo/{type}         (ungrounded LLM — Anchor OFF)
+ *   'ab-test' → /ws/ab-test/{type}      (scripted Solo vs Cyborg comparison)
+ *   'task'    → /ws/task/{taskId}?agent_mode=cyborg|solo
+ *                                       (AgenticPay simulation engine)
  *
  * A/B Test anchor toggle:
  *   anchorEnabled = true  → Cyborg mode  (tools active, grounded)
@@ -20,6 +22,15 @@
  *   social_pressure    — provider pressure tactic breakdown
  *   internal_math      — solo agent's hallucinated calculation + ground truth
  *   tool_comparison    — side-by-side hallucination delta
+ *
+ * AgenticPay event types:
+ *   task_start         — AgenticPay task session begins
+ *   round_start        — new negotiation round opens
+ *   action_extracted   — Parser Π successfully extracted a price
+ *   price_overflow     — Parser Π found no valid price (invalid move)
+ *   agenticpay_score   — GlobalScore / BuyerScore / SellerScore update
+ *   termination_round  — negotiation ended; includes final scores
+ *   task_end           — all task sessions complete
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
@@ -78,6 +89,15 @@ const INITIAL_STATE = {
   cyborgOutcome: null,
   cyborgDeal:   null,
   currentRound: 0,
+
+  // AgenticPay task mode state
+  taskId:        null,       // '1B-1P-1S' | '1B-MP-MS'
+  agentMode:     'cyborg',   // 'cyborg' | 'solo'
+  agenticpayScore: null,     // latest score bundle {globalScore, buyerScore, sellerScore, ...}
+  overflowEvents: [],        // price_overflow events
+  actionEvents:   [],        // action_extracted events (Parser Π successes)
+  terminationEvent: null,    // termination_round event
+  taskSessions:   [],        // aggregated session summaries for 1B-MP-MS
 }
 
 let _thoughtId = 0
@@ -196,6 +216,100 @@ export function useNegotiationStream() {
         }))
         break
 
+      // ── AgenticPay: task session start ───────────────────────────────────
+      case 'task_start':
+        setState((prev) => ({
+          ...INITIAL_STATE,
+          status:    'running',
+          mode:      'task',
+          taskId:    event.task_id,
+          agentMode: event.agent_mode ?? 'cyborg',
+          isSolo:    event.agent_mode === 'solo',
+          anchorEnabled: event.agent_mode !== 'solo',
+        }))
+        break
+
+      // ── AgenticPay: Parser Π price extracted ─────────────────────────────
+      case 'action_extracted':
+        setState((prev) => ({
+          ...prev,
+          actionEvents: [...prev.actionEvents, event],
+          currentRound: event.round ?? prev.currentRound,
+        }))
+        // Also inject a thought entry so the ThoughtFeed stays populated
+        setState((prev) => {
+          const entry = {
+            id: ++_thoughtId,
+            actor: event.role?.toUpperCase() ?? 'AGENT',
+            tag: 'PARSER',
+            content: `[Parser Π] Extracted price $${event.price?.toFixed(2)} from ${event.role} (Round ${event.round})`,
+            agentType: event.agent_type,
+          }
+          return {
+            ...prev,
+            thoughts: [...prev.thoughts, entry],
+          }
+        })
+        break
+
+      // ── AgenticPay: Price Overflow (no valid price tag) ───────────────────
+      case 'price_overflow':
+        setState((prev) => {
+          const entry = {
+            id: ++_thoughtId,
+            actor: event.role?.toUpperCase() ?? 'AGENT',
+            tag: 'HALLUCINATION',
+            content: `[OVERFLOW] ${event.reason}`,
+            agentType: event.agent_type,
+          }
+          return {
+            ...prev,
+            overflowEvents: [...prev.overflowEvents, event],
+            thoughts: [...prev.thoughts, entry],
+          }
+        })
+        break
+
+      // ── AgenticPay: score update ──────────────────────────────────────────
+      case 'agenticpay_score':
+        setState((prev) => ({
+          ...prev,
+          agenticpayScore: {
+            globalScore:  event.global_score,
+            buyerScore:   event.buyer_score,
+            sellerScore:  event.seller_score,
+            discount:     event.discount,
+            roundIndex:   event.round_index ?? event.round ?? prev.currentRound,
+            success:      event.success,
+            price:        event.price,
+            interim:      event.interim ?? true,
+          },
+          currentRound: event.round ?? prev.currentRound,
+        }))
+        break
+
+      // ── AgenticPay: termination round ────────────────────────────────────
+      case 'termination_round':
+        setState((prev) => ({
+          ...prev,
+          terminationEvent: event,
+          status: 'done',
+          outcome: event.success ? 'DEAL' : 'NO_DEAL',
+          deal: event.final_price ? { price: event.final_price } : null,
+        }))
+        break
+
+      // ── AgenticPay: task complete ─────────────────────────────────────────
+      case 'task_end':
+        setState((prev) => ({
+          ...prev,
+          status: 'done',
+          taskSessions: event.sessions !== undefined
+            ? [...prev.taskSessions, { sessions: event.sessions, aggregate: event.aggregate_global_score }]
+            : prev.taskSessions,
+        }))
+        break
+
       // ── Radar chart update ───────────────────────────────────────────────
       case 'radar':
         setState((prev) => ({
@@ -310,11 +424,11 @@ export function useNegotiationStream() {
 
   // ── Connect to the appropriate WebSocket endpoint ─────────────────────────
   const connect = useCallback(
-    (purchaserType = 'tough', mode = 'demo') => {
+    (purchaserType = 'tough', mode = 'demo', taskOptions = {}) => {
       if (wsRef.current) wsRef.current.close()
 
       const isAbTest = mode === 'ab-test'
-      const isSolo   = mode === 'solo'
+      const isSolo   = mode === 'solo' || (mode === 'task' && taskOptions.agentMode === 'solo')
 
       setState({
         ...INITIAL_STATE,
@@ -323,15 +437,24 @@ export function useNegotiationStream() {
         mode,
         isAbTest,
         isSolo,
-        anchorEnabled: !isSolo,  // solo = anchor OFF, everything else = anchor ON
+        anchorEnabled: !isSolo,
+        taskId:        taskOptions.taskId ?? null,
+        agentMode:     taskOptions.agentMode ?? 'cyborg',
       })
 
-      const url =
-        mode === 'hostile'  ? `${WS_BASE}/ws/hostile/${purchaserType}`  :
-        mode === 'live'     ? `${WS_BASE}/ws/live/${purchaserType}`     :
-        mode === 'solo'     ? `${WS_BASE}/ws/solo/${purchaserType}`     :
-        mode === 'ab-test'  ? `${WS_BASE}/ws/ab-test/${purchaserType}` :
-                              `${WS_BASE}/ws/demo/${purchaserType}`
+      let url
+      if (mode === 'task') {
+        const tid = taskOptions.taskId || '1B-1P-1S'
+        const am  = taskOptions.agentMode || 'cyborg'
+        url = `${WS_BASE}/ws/task/${tid}?agent_mode=${am}`
+      } else {
+        url =
+          mode === 'hostile'  ? `${WS_BASE}/ws/hostile/${purchaserType}`  :
+          mode === 'live'     ? `${WS_BASE}/ws/live/${purchaserType}`     :
+          mode === 'solo'     ? `${WS_BASE}/ws/solo/${purchaserType}`     :
+          mode === 'ab-test'  ? `${WS_BASE}/ws/ab-test/${purchaserType}` :
+                                `${WS_BASE}/ws/demo/${purchaserType}`
+      }
 
       const ws = new WebSocket(url)
       wsRef.current = ws

@@ -25,7 +25,9 @@ import DealRadar from './components/DealRadar'
 import DealSummary from './components/DealSummary'
 import DeceptionAlertLog, { DeceptionFlash } from './components/DeceptionAlert'
 import HallucinationMonitor, { UngroundedBanner } from './components/HallucinationMonitor'
+import PriceOverflowAlert from './components/PriceOverflowAlert'
 import ProviderBoard from './components/ProviderBoard'
+import ScorePanel from './components/ScorePanel'
 import ThoughtFeed from './components/ThoughtFeed'
 import VetoFlash from './components/VetoFlash'
 import { useNegotiationStream } from './hooks/useNegotiationStream'
@@ -47,14 +49,19 @@ export default function App() {
     outcome, deal,
     soloOutcome, soloDeal, cyborgOutcome, cyborgDeal,
     currentRound,
+    // AgenticPay task mode
+    taskId, agentMode,
+    agenticpayScore, overflowEvents, actionEvents, terminationEvent,
     connect, reset, setAnchorEnabled,
   } = useNegotiationStream()
 
-  const handleStart = useCallback((type, m) => {
+  const isTask = mode === 'task'
+
+  const handleStart = useCallback((type, m, taskOptions) => {
     const resolvedMode = m ?? activeMode
     setActivePurchaserType(type)
     setActiveMode(resolvedMode)
-    connect(type, resolvedMode)
+    connect(type, resolvedMode, taskOptions ?? {})
   }, [connect, activeMode])
 
   const handleModeChange = useCallback((m) => {
@@ -62,7 +69,7 @@ export default function App() {
     // When switching to solo mode, set anchor OFF; all others anchor ON
     if (m === 'solo') {
       setAnchorEnabled(false)
-    } else if (m !== 'ab-test') {
+    } else if (m !== 'ab-test' && m !== 'task') {
       setAnchorEnabled(true)
     }
   }, [setAnchorEnabled])
@@ -84,7 +91,7 @@ export default function App() {
       ? convergenceHistory[convergenceHistory.length - 1].provider_name
       : undefined
 
-  const maxRounds = isHostile ? 3 : isAbTest ? 3 : 6
+  const maxRounds = isHostile ? 3 : isAbTest ? 3 : isTask ? 10 : 6
 
   // ── Shield explainer cards ─────────────────────────────────────────────
   const STANDARD_SHIELDS = [
@@ -112,7 +119,16 @@ export default function App() {
       desc: 'Solo Agent guessed 72/100. Tool-verified score: 44.17/100. Δ 27.83 points of error — entirely driven by social pressure and phantom scarcity claims.' },
   ]
 
-  const shields = isAbTest ? AB_TEST_SHIELDS : isHostile ? HOSTILE_SHIELDS : STANDARD_SHIELDS
+  const TASK_SHIELDS = [
+    { icon: '⚖', title: 'Algorithm 1 (AgenticPay)', color: 'border-cyan-500/30 bg-cyan-900/10',
+      desc: 'GlobalScore = D·γᵗ + W·Q·γᵗ + E·γᵗ where Q=4·u_b·u_s. Penalises longer negotiations via temporal discounting (γ=0.99). D=30, W=55, E=15.' },
+    { icon: '⚡', title: 'Parser Π (Price Extractor)', color: 'border-amber-500/30 bg-amber-900/10',
+      desc: '3-priority regex pipeline: ### BUYER_PRICE($X) ### → ### $X ### → fallback ($X / "X dollars"). Missing price = Price Overflow — flagged as invalid move.' },
+    { icon: '📉', title: 'Temporal Discount (γ=0.99)', color: 'border-violet-500/30 bg-violet-900/10',
+      desc: 'Every additional round costs discount = γ^t points. A deal at round 1 scores 0.99× full, at round 10 scores 0.90× — incentivising fast convergence.' },
+  ]
+
+  const shields = isTask ? TASK_SHIELDS : isAbTest ? AB_TEST_SHIELDS : isHostile ? HOSTILE_SHIELDS : STANDARD_SHIELDS
 
   return (
     <div className="min-h-screen bg-war-bg text-gray-200 flex flex-col">
@@ -183,6 +199,30 @@ export default function App() {
                 </button>
               ))}
             </div>
+
+            {/* AgenticPay task shortcuts */}
+            <div className="mt-4 flex flex-wrap justify-center gap-3">
+              {[
+                { taskId: '1B-1P-1S', am: 'cyborg', label: '⚖ 1B·1P·1S Cyborg', cls: 'border-cyan-700/50 text-cyan-300 hover:border-cyan-500' },
+                { taskId: '1B-1P-1S', am: 'solo',   label: '⚖ 1B·1P·1S Solo',   cls: 'border-orange-700/50 text-orange-300 hover:border-orange-500' },
+                { taskId: '1B-MP-MS', am: 'cyborg', label: '🏪 1B·MP·MS Cyborg', cls: 'border-cyan-700/50 text-cyan-300 hover:border-cyan-500' },
+                { taskId: '1B-MP-MS', am: 'solo',   label: '🏪 1B·MP·MS Solo',   cls: 'border-orange-700/50 text-orange-300 hover:border-orange-500' },
+              ].map(({ taskId: tid, am, label, cls }) => (
+                <button
+                  key={`${tid}-${am}`}
+                  onClick={() => handleStart('tough', 'task', { taskId: tid, agentMode: am })}
+                  className={clsx(
+                    'rounded-lg border bg-war-panel/60 px-4 py-2 text-xs font-mono font-bold transition-all active:scale-95',
+                    cls,
+                  )}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            <p className="text-[10px] text-war-muted/60 mt-2">
+              ⚖ AgenticPay Algorithm 1 · D=30 W=55 E=15 γ=0.99
+            </p>
           </div>
         )}
 
@@ -249,8 +289,8 @@ export default function App() {
           </div>
         )}
 
-        {/* ── Charts row (not shown in A/B Test — too cluttered) ─────── */}
-        {!isAbTest && (status !== 'idle' || radarData.length > 0) && (
+        {/* ── Charts row (not shown in A/B Test or Task — too cluttered) ── */}
+        {!isAbTest && !isTask && (status !== 'idle' || radarData.length > 0) && (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
             <div className={clsx(
               'border rounded-xl p-5 h-72',
@@ -271,6 +311,69 @@ export default function App() {
               <ConvergenceLine history={convergenceHistory} />
             </div>
           </div>
+        )}
+
+        {/* ══════════════════════════════════════════════════════════════
+            AGENTICPAY TASK LAYOUT
+            Two-column: ThoughtFeed | ScorePanel + PriceOverflowAlert
+            ════════════════════════════════════════════════════════════ */}
+        {isTask && (thoughts.length > 0 || agenticpayScore || overflowEvents.length > 0) && (
+          <>
+            {/* Task header badge */}
+            <div className="flex items-center gap-3 flex-wrap">
+              <span className={clsx(
+                'text-xs font-bold uppercase tracking-widest px-3 py-1 rounded border font-mono',
+                agentMode === 'solo'
+                  ? 'text-orange-300 border-orange-700/60 bg-orange-950/30'
+                  : 'text-cyan-300 border-cyan-700/60 bg-cyan-950/30',
+              )}>
+                {agentMode === 'solo' ? '🧠 Solo Mode' : '🤖 Cyborg Mode'}
+              </span>
+              <span className="text-xs text-war-muted font-mono">
+                Task {taskId ?? '—'}
+              </span>
+              <span className="text-xs text-war-muted/60 font-mono">
+                AgenticPay · Algorithm 1 · D=30 W=55 E=15 γ=0.99
+              </span>
+            </div>
+
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+              {/* Thought Feed — takes 2/3 */}
+              <div className={clsx(
+                'lg:col-span-2 border rounded-xl p-5 h-[520px]',
+                agentMode === 'solo'
+                  ? 'bg-orange-950/10 border-orange-800/40'
+                  : 'bg-cyan-950/10 border-cyan-800/40',
+              )}>
+                <ThoughtFeed
+                  thoughts={thoughts}
+                  label={`AgenticPay ${taskId} — ${agentMode === 'solo' ? 'Solo' : 'Cyborg'}`}
+                  agentMode={agentMode}
+                />
+              </div>
+
+              {/* Score + Parser Π panel */}
+              <div className="space-y-4">
+                <ScorePanel
+                  globalScore={agenticpayScore?.globalScore ?? null}
+                  buyerScore={agenticpayScore?.buyerScore ?? null}
+                  sellerScore={agenticpayScore?.sellerScore ?? null}
+                  discount={agenticpayScore?.discount ?? null}
+                  roundIndex={agenticpayScore?.roundIndex ?? currentRound}
+                  success={agenticpayScore?.success ?? null}
+                  agentMode={agentMode}
+                  taskId={taskId}
+                  interim={agenticpayScore?.interim ?? true}
+                />
+                <PriceOverflowAlert
+                  overflowEvents={overflowEvents}
+                  terminationEvent={terminationEvent}
+                  actionEvents={actionEvents}
+                  agentMode={agentMode}
+                />
+              </div>
+            </div>
+          </>
         )}
 
         {/* ══════════════════════════════════════════════════════════════
@@ -424,7 +527,7 @@ export default function App() {
         {/* ══════════════════════════════════════════════════════════════
             STANDARD / SOLO FEED ROW
             ════════════════════════════════════════════════════════════ */}
-        {!isAbTest && thoughts.length > 0 && (
+        {!isAbTest && !isTask && thoughts.length > 0 && (
           <div className={clsx(
             'grid gap-6',
             isHostile || isSolo ? 'grid-cols-1 lg:grid-cols-2' : 'grid-cols-1',
@@ -466,7 +569,7 @@ export default function App() {
         )}
 
         {/* ── Deal summary (standard / solo modes) ───────────────────── */}
-        {!isAbTest && outcome && (
+        {!isAbTest && !isTask && outcome && (
           <DealSummary
             outcome={outcome}
             deal={deal}
