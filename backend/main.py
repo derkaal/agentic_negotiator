@@ -941,7 +941,7 @@ async def websocket_market(websocket: WebSocket, scenario: str = "used_car"):
         return
 
     try:
-        async for event in run_market_3x3(scenario=scenario):
+        async for event in run_market_3x3(scenario=scenario, max_rounds=15):
             await websocket.send_text(json.dumps(event))
             await asyncio.sleep(0)
     except WebSocketDisconnect:

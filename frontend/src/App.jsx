@@ -56,7 +56,8 @@ export default function App() {
     // N-to-N Market
     isMarket,
     marketScenario, marketBuyers, marketSellers,
-    pairMatrix, closedDeals, switchEvents, dealRate, marketScore, marketEnd,
+    pairMatrix, closedDeals, switchEvents, dealRate, marketScore,
+    sellerStrategies, auditTrail, marketEnd,
     connect, reset, setAnchorEnabled,
   } = useNegotiationStream()
 
@@ -95,7 +96,7 @@ export default function App() {
       ? convergenceHistory[convergenceHistory.length - 1].provider_name
       : undefined
 
-  const maxRounds = isHostile ? 3 : isAbTest ? 3 : isTask ? 10 : isMarket ? 10 : 6
+  const maxRounds = isHostile ? 3 : isAbTest ? 3 : isTask ? 10 : isMarket ? 15 : 6
 
   // ── Shield explainer cards ─────────────────────────────────────────────
   const STANDARD_SHIELDS = [
@@ -359,6 +360,9 @@ export default function App() {
                 dealRate={dealRate}
                 marketScore={marketScore}
                 switchEvents={switchEvents}
+                sellerStrategies={sellerStrategies}
+                auditTrail={auditTrail}
+                marketEnd={marketEnd}
                 currentRound={currentRound}
                 scenario={marketScenario}
               />
