@@ -98,6 +98,18 @@ const INITIAL_STATE = {
   actionEvents:   [],        // action_extracted events (Parser Π successes)
   terminationEvent: null,    // termination_round event
   taskSessions:   [],        // aggregated session summaries for 1B-MP-MS
+
+  // N-to-N Market (MBMPMS) state
+  isMarket:       false,
+  marketScenario: null,          // 'used_car'
+  marketBuyers:   [],            // buyer config list from market_start
+  marketSellers:  [],            // seller config list from market_start
+  pairMatrix:     {},            // "buyerId:sellerId" → latest pair snapshot
+  closedDeals:    [],            // deal_closed events
+  switchEvents:   [],            // market_switch events
+  dealRate:       null,          // 0-1
+  marketScore:    null,          // {global_score, buyer_score, seller_score}
+  marketEnd:      null,          // market_end event payload
 }
 
 let _thoughtId = 0
@@ -310,6 +322,79 @@ export function useNegotiationStream() {
         }))
         break
 
+      // ── N-to-N Market: session start ──────────────────────────────────────
+      case 'market_start':
+        setState((prev) => ({
+          ...INITIAL_STATE,
+          status:        'running',
+          mode:          'market',
+          isMarket:      true,
+          marketScenario: event.scenario,
+          marketBuyers:   event.buyers  ?? [],
+          marketSellers:  event.sellers ?? [],
+          pairMatrix:     {},
+          closedDeals:    [],
+          switchEvents:   [],
+          dealRate:       null,
+          marketScore:    null,
+          marketEnd:      null,
+        }))
+        break
+
+      // ── N-to-N Market: round summary (batch update all 9 pairs) ──────────
+      case 'market_round':
+        setState((prev) => {
+          const nextMatrix = { ...prev.pairMatrix }
+          for (const p of (event.pairs ?? [])) {
+            nextMatrix[`${p.buyer_id}:${p.seller_id}`] = p
+          }
+          return { ...prev, pairMatrix: nextMatrix, currentRound: event.round ?? prev.currentRound }
+        })
+        break
+
+      // ── N-to-N Market: market switch ──────────────────────────────────────
+      case 'market_switch':
+        setState((prev) => ({
+          ...prev,
+          switchEvents: [...prev.switchEvents, event],
+        }))
+        break
+
+      // ── N-to-N Market: deal closed ────────────────────────────────────────
+      case 'deal_closed':
+        setState((prev) => ({
+          ...prev,
+          closedDeals: [...prev.closedDeals, event],
+        }))
+        break
+
+      // ── N-to-N Market: deal rate update ───────────────────────────────────
+      case 'deal_rate':
+        setState((prev) => ({ ...prev, dealRate: event.rate ?? prev.dealRate }))
+        break
+
+      // ── N-to-N Market: market score ───────────────────────────────────────
+      case 'market_score':
+        setState((prev) => ({
+          ...prev,
+          marketScore: {
+            global_score: event.global_score,
+            buyer_score:  event.buyer_score,
+            seller_score: event.seller_score,
+          },
+        }))
+        break
+
+      // ── N-to-N Market: session end ────────────────────────────────────────
+      case 'market_end':
+        setState((prev) => ({
+          ...prev,
+          status:    'done',
+          marketEnd: event,
+          outcome:   event.closed > 0 ? 'DEAL' : 'NO_DEAL',
+        }))
+        break
+
       // ── Radar chart update ───────────────────────────────────────────────
       case 'radar':
         setState((prev) => ({
@@ -429,6 +514,7 @@ export function useNegotiationStream() {
 
       const isAbTest = mode === 'ab-test'
       const isSolo   = mode === 'solo' || (mode === 'task' && taskOptions.agentMode === 'solo')
+      const isMarket = mode === 'market'
 
       setState({
         ...INITIAL_STATE,
@@ -437,9 +523,11 @@ export function useNegotiationStream() {
         mode,
         isAbTest,
         isSolo,
+        isMarket,
         anchorEnabled: !isSolo,
         taskId:        taskOptions.taskId ?? null,
         agentMode:     taskOptions.agentMode ?? 'cyborg',
+        marketScenario: taskOptions.scenario ?? null,
       })
 
       let url
@@ -447,6 +535,9 @@ export function useNegotiationStream() {
         const tid = taskOptions.taskId || '1B-1P-1S'
         const am  = taskOptions.agentMode || 'cyborg'
         url = `${WS_BASE}/ws/task/${tid}?agent_mode=${am}`
+      } else if (mode === 'market') {
+        const sc = taskOptions.scenario || 'used_car'
+        url = `${WS_BASE}/ws/market/${sc}`
       } else {
         url =
           mode === 'hostile'  ? `${WS_BASE}/ws/hostile/${purchaserType}`  :

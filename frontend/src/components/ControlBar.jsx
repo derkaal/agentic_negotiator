@@ -41,6 +41,7 @@ export default function ControlBar({
   const isAbTest  = mode === 'ab-test'
   const isSolo    = mode === 'solo'
   const isTask    = mode === 'task'
+  const isMarket  = mode === 'market'
 
   return (
     <header className="bg-war-panel border-b border-war-border px-6 py-3">
@@ -77,7 +78,7 @@ export default function ControlBar({
         {/* Row 2: All controls */}
         <div className="flex items-center gap-3 flex-wrap">
 
-          {/* Mode toggle: Demo / Live / Hostile / Solo / A-B Test */}
+          {/* Mode toggle */}
           <div className="flex rounded-lg border border-war-border overflow-hidden flex-shrink-0">
             {[
               { id: 'demo',    label: '🎬 Demo',    activeClass: 'bg-war-purple text-white' },
@@ -86,6 +87,7 @@ export default function ControlBar({
               { id: 'solo',    label: '🧠 Solo',    activeClass: 'bg-orange-600 text-white' },
               { id: 'ab-test', label: '⚗️ A/B Test', activeClass: 'bg-violet-700 text-white' },
               { id: 'task',    label: '⚖ Task',    activeClass: 'bg-cyan-700   text-white' },
+              { id: 'market',  label: '🏪 Market',  activeClass: 'bg-emerald-700 text-white' },
             ].map(({ id, label, activeClass }) => (
               <button
                 key={id}
@@ -103,8 +105,8 @@ export default function ControlBar({
             ))}
           </div>
 
-          {/* ── Anchor Toggle ── (shown for all modes except hostile, ab-test, task) */}
-          {mode !== 'hostile' && mode !== 'ab-test' && mode !== 'task' && (
+          {/* ── Anchor Toggle ── (shown for all modes except hostile, ab-test, task, market) */}
+          {mode !== 'hostile' && mode !== 'ab-test' && mode !== 'task' && mode !== 'market' && (
             <div className="flex items-center gap-2 flex-shrink-0">
               <span className="text-xs text-gray-500 font-mono">Anchor:</span>
               <button
@@ -157,6 +159,16 @@ export default function ControlBar({
             </div>
           )}
 
+          {/* Market mode indicator */}
+          {isMarket && (
+            <div className="flex items-center gap-2 flex-shrink-0">
+              <span className="bg-emerald-900/60 border border-emerald-600/50 text-emerald-300 text-xs font-bold px-2 py-1 rounded font-mono animate-pulse">
+                🏪 3×3 MARKET
+              </span>
+              <span className="text-emerald-400 text-xs font-mono">Parallel · Switch&lt;40</span>
+            </div>
+          )}
+
           {/* Solo mode indicator */}
           {isSolo && (
             <div className="flex items-center gap-1.5 flex-shrink-0">
@@ -165,30 +177,32 @@ export default function ControlBar({
             </div>
           )}
 
-          {/* Purchaser type toggle */}
-          <div className="flex rounded-lg border border-war-border overflow-hidden flex-shrink-0">
-            {['tough', 'emergency'].map((type) => (
-              <button
-                key={type}
-                disabled={isRunning}
-                onClick={() => !isRunning && onStart(type, mode)}
-                className={clsx(
-                  'px-4 py-2 text-xs font-bold uppercase tracking-wider transition-colors whitespace-nowrap',
-                  purchaserType === type && !isRunning
-                    ? 'bg-war-accent text-black'
-                    : 'bg-war-panel text-gray-400 hover:bg-war-border disabled:cursor-not-allowed disabled:opacity-50'
-                )}
-              >
-                {type === 'tough' ? '💪 Tough' : '🚨 Emergency'}
-              </button>
-            ))}
-          </div>
+          {/* Purchaser type toggle (hidden in market mode — has its own 3 buyers) */}
+          {!isMarket && (
+            <div className="flex rounded-lg border border-war-border overflow-hidden flex-shrink-0">
+              {['tough', 'emergency'].map((type) => (
+                <button
+                  key={type}
+                  disabled={isRunning}
+                  onClick={() => !isRunning && onStart(type, mode)}
+                  className={clsx(
+                    'px-4 py-2 text-xs font-bold uppercase tracking-wider transition-colors whitespace-nowrap',
+                    purchaserType === type && !isRunning
+                      ? 'bg-war-accent text-black'
+                      : 'bg-war-panel text-gray-400 hover:bg-war-border disabled:cursor-not-allowed disabled:opacity-50'
+                  )}
+                >
+                  {type === 'tough' ? '💪 Tough' : '🚨 Emergency'}
+                </button>
+              ))}
+            </div>
+          )}
 
           <div className="flex-1" />
 
           {/* Start button */}
           <button
-            onClick={() => onStart(purchaserType, mode)}
+            onClick={() => onStart(purchaserType, mode, isMarket ? { scenario: 'used_car' } : undefined)}
             disabled={isRunning}
             className={clsx(
               'px-5 py-2 rounded-lg text-xs font-bold uppercase tracking-wider transition-all whitespace-nowrap flex-shrink-0',
@@ -204,6 +218,8 @@ export default function ControlBar({
                 ? 'bg-violet-700 text-white hover:bg-violet-600 active:scale-95'
                 : mode === 'task'
                 ? 'bg-cyan-700 text-white hover:bg-cyan-600 active:scale-95'
+                : mode === 'market'
+                ? 'bg-emerald-700 text-white hover:bg-emerald-600 active:scale-95'
                 : 'bg-war-purple text-white hover:bg-purple-500 active:scale-95'
             )}
           >
@@ -219,6 +235,8 @@ export default function ControlBar({
               ? '⚗️ Run A/B Test'
               : mode === 'task'
               ? '⚖ Run Task'
+              : mode === 'market'
+              ? '🏪 Run Market'
               : '▶ Play Demo'
             }
           </button>
