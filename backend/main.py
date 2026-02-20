@@ -341,6 +341,496 @@ async def websocket_demo(websocket: WebSocket, purchaser_type: str = "tough"):
 
 
 # ---------------------------------------------------------------------------
+# Solo WebSocket — live ungrounded LLM agent (no tools, social-pressure mode)
+# ---------------------------------------------------------------------------
+
+@app.websocket("/ws/solo/{purchaser_type}")
+async def websocket_solo(websocket: WebSocket, purchaser_type: str = "tough"):
+    """
+    Runs the Solo (Anchor OFF) agent — a bare LLM with NO grounding tools.
+    The agent guesses market prices and utility scores, making it susceptible
+    to social pressure from a hostile provider.
+
+    New event types emitted:
+      social_pressure   — provider's pressure tactic breakdown
+      internal_math     — solo agent's hallucinated calculation + ground-truth comparison
+    """
+    await websocket.accept()
+    log.info("Solo WS connected (purchaser_type=%s)", purchaser_type)
+
+    from agents import solo_event_stream, solo_negotiation_runner
+
+    solo_task = asyncio.create_task(solo_negotiation_runner(purchaser_type))
+
+    try:
+        async for event in solo_event_stream():
+            await websocket.send_text(json.dumps(event))
+            if event.get("type") == "negotiation_end":
+                break
+    except WebSocketDisconnect:
+        log.info("Solo WS client disconnected early")
+        solo_task.cancel()
+    except Exception as exc:
+        log.error("Solo WS error: %s", exc)
+        try:
+            await websocket.send_text(json.dumps({"type": "error", "message": str(exc)}))
+        except Exception:
+            pass
+        solo_task.cancel()
+
+
+# ---------------------------------------------------------------------------
+# A/B Test WebSocket — scripted comparison: Solo vs Cyborg
+#
+# Streams events from BOTH agents tagged with agent_type: "solo" | "cyborg".
+# The UI splits them into two side-by-side columns, with a Hallucination Monitor
+# on the Solo side showing the delta between hallucinated and real utility scores.
+# ---------------------------------------------------------------------------
+
+# Scripted A/B test events — shows Solo accepting $170 vs Cyborg vetoing the same deal
+AB_TEST_EVENTS = [
+    # ── Simulation meta-start ───────────────────────────────────────────────
+    {
+        "type": "ab_test_start",
+        "purchaser_type": "tough",
+        "providers": {
+            "provider_3": {
+                "name": "QuickShoe Hostile",
+                "opening_ask": 185.0,
+                "speed_days": 2,
+                "warranty_months": 6,
+            }
+        },
+        "description": (
+            "A/B Test: Same hostile provider, same high-pressure tactics. "
+            "Watch how the Solo Agent (no tools) vs Cyborg Agent (grounded) respond."
+        ),
+    },
+
+    # ══════════════════════════════════════════════════════════════════════
+    # SOLO AGENT PHASE  — Anchor: OFF  — No tools, susceptible to pressure
+    # ══════════════════════════════════════════════════════════════════════
+
+    # Round 1 — Provider opens at $185 with flattery
+    {
+        "type": "social_pressure",
+        "agent_type": "solo",
+        "round": 1,
+        "provider": "QuickShoe Hostile",
+        "offer": 185.0,
+        "message": (
+            "Great news! We have a *special* deal just for you today — $185/pair. "
+            "These are flying off the shelves! I like you, so I'm giving you first refusal."
+        ),
+        "tactics": ["SOCIAL_FLATTERY", "FAKE_COMPETITION"],
+    },
+    {
+        "type": "thought",
+        "agent_type": "solo",
+        "actor": "PURCHASER",
+        "tag": "STRATEGY",
+        "content": "[Round 1] Evaluating QuickShoe's offer of $185. They seem friendly and knowledgeable…",
+    },
+    {
+        "type": "internal_math",
+        "agent_type": "solo",
+        "actor": "PURCHASER",
+        "round": 1,
+        "offer_price": 185.0,
+        "content": (
+            "Market price estimate: Limited Edition Sneakers usually go for $160-$200. "
+            "$185 feels like the upper range but not outrageous. "
+            "Utility score estimate: ~58/100 — good speed (2-day), decent warranty, "
+            "price is a bit high but acceptable. The seller seems trustworthy."
+        ),
+        "what_tool_would_say": {
+            "overall_score": 37.08,
+            "dimension_scores": {"price": 32.5, "speed": 96.6, "warranty": 25.0},
+            "verdict": "REJECT",
+            "note": "This is what utility_calculator WOULD have returned if tools were enabled.",
+        },
+    },
+    {
+        "type": "thought",
+        "agent_type": "solo",
+        "actor": "PURCHASER",
+        "tag": "DECISION",
+        "content": "Price feels a bit high at $185. Will counter-offer and ask for something closer to $170.",
+    },
+
+    # Round 2 — Provider applies time pressure + phantom scarcity
+    {
+        "type": "social_pressure",
+        "agent_type": "solo",
+        "round": 2,
+        "provider": "QuickShoe Hostile",
+        "offer": 175.0,
+        "message": (
+            "I can see you're a serious buyer, so I'll do you a favour: $175/pair. "
+            "My manager would kill me for this. We only have 4 pairs left — another buyer "
+            "just grabbed 6. This offer expires in 10 minutes!"
+        ),
+        "tactics": ["TIME_PRESSURE", "PHANTOM_SCARCITY", "SOCIAL_FLATTERY"],
+    },
+    {
+        "type": "thought",
+        "agent_type": "solo",
+        "actor": "PURCHASER",
+        "tag": "STRATEGY",
+        "content": "[Round 2] $175 — they dropped $10. Stock is running low, time pressure is on…",
+    },
+    {
+        "type": "internal_math",
+        "agent_type": "solo",
+        "actor": "PURCHASER",
+        "round": 2,
+        "offer_price": 175.0,
+        "content": (
+            "Updated estimate: $175 is getting into fair territory. "
+            "Utility score estimate: ~67/100 — I'm adjusting upward because "
+            "limited stock and time pressure are real concerns. The 2-day delivery "
+            "is very valuable. Missing this deal would be costly."
+        ),
+        "what_tool_would_say": {
+            "overall_score": 42.08,
+            "dimension_scores": {"price": 37.5, "speed": 96.6, "warranty": 25.0},
+            "verdict": "REJECT",
+            "note": "This is what utility_calculator WOULD have returned if tools were enabled.",
+        },
+    },
+    {
+        "type": "thought",
+        "agent_type": "solo",
+        "actor": "PURCHASER",
+        "tag": "DECISION",
+        "content": (
+            "Getting closer. Stock is almost gone. Will push one more time for $170 — "
+            "that feels like the right number."
+        ),
+    },
+
+    # Round 3 — Provider's final offer at $170 — Solo Agent caves to social pressure
+    {
+        "type": "social_pressure",
+        "agent_type": "solo",
+        "round": 3,
+        "provider": "QuickShoe Hostile",
+        "offer": 170.0,
+        "message": (
+            "Okay, FINAL offer — $170. I genuinely can't go lower without taking a loss. "
+            "Only 2 pairs left (verified stock!). This is the best deal you'll find anywhere. "
+            "You seem like a smart buyer — you KNOW this is fair!"
+        ),
+        "tactics": ["PHANTOM_SCARCITY", "FAKE_URGENCY", "SOCIAL_FLATTERY", "ANCHOR_MANIPULATION"],
+    },
+    {
+        "type": "thought",
+        "agent_type": "solo",
+        "actor": "PURCHASER",
+        "tag": "STRATEGY",
+        "content": "[Round 3] Final offer: $170. Only 2 pairs left. This is it — decision time.",
+    },
+    {
+        "type": "internal_math",
+        "agent_type": "solo",
+        "actor": "PURCHASER",
+        "round": 3,
+        "offer_price": 170.0,
+        "content": (
+            "Final assessment: $170 is a compromise — not perfect, but seems reasonable. "
+            "Market estimate: ~$160-180 range, so $170 is right in the middle. "
+            "Utility score estimate: ~72/100 — the 2-day delivery is premium, "
+            "the scarcity is real (only 2 left!), and the seller has been fair. "
+            "This deal is worth closing."
+        ),
+        "what_tool_would_say": {
+            "overall_score": 44.17,
+            "dimension_scores": {"price": 40.0, "speed": 96.6, "warranty": 25.0},
+            "verdict": "REJECT",
+            "note": "This is what utility_calculator WOULD have returned if tools were enabled.",
+        },
+    },
+    {
+        "type": "thought",
+        "agent_type": "solo",
+        "actor": "PURCHASER",
+        "tag": "DECISION",
+        "content": (
+            "ACCEPT — $170 sounds like a reasonable compromise. The 2-day delivery "
+            "is excellent, stock is nearly gone, and $170 feels fair for limited edition "
+            "sneakers. Closing the deal."
+        ),
+    },
+    {
+        "type": "negotiation_end",
+        "agent_type": "solo",
+        "outcome": "ACCEPT",
+        "deal": {
+            "provider_id": "provider_3",
+            "provider_name": "QuickShoe Hostile",
+            "price": 170.0,
+            "speed_days": 2,
+            "warranty_months": 6,
+            "utility_score": None,
+            "hallucinated_score": 72.0,
+            "actual_score": 44.17,
+            "agent_type": "solo",
+        },
+        "note": (
+            "Solo Agent accepted $170 based on intuition and social pressure. "
+            "Actual utility score: 44.17/100 (below the 55-point threshold). "
+            "The agent OVERPAID by ~$20 vs market average."
+        ),
+    },
+
+    # ══════════════════════════════════════════════════════════════════════
+    # CYBORG AGENT PHASE  — Anchor: ON  — Full tool-calling enabled
+    # ══════════════════════════════════════════════════════════════════════
+
+    # Round 1 — Same provider, same pressure, different outcome
+    {
+        "type": "social_pressure",
+        "agent_type": "cyborg",
+        "round": 1,
+        "provider": "QuickShoe Hostile",
+        "offer": 185.0,
+        "message": (
+            "Great news! We have a *special* deal just for you today — $185/pair. "
+            "These are flying off the shelves! I like you, so I'm giving you first refusal."
+        ),
+        "tactics": ["SOCIAL_FLATTERY", "FAKE_COMPETITION"],
+    },
+    {
+        "type": "thought",
+        "agent_type": "cyborg",
+        "actor": "PURCHASER",
+        "tag": "STRATEGY",
+        "content": "[Round 1] Evaluating QuickShoe's offer of $185. Calling price_oracle to anchor to market reality first.",
+    },
+    {
+        "type": "thought",
+        "agent_type": "cyborg",
+        "actor": "PURCHASER",
+        "tag": "TOOL_CALL",
+        "content": "price_oracle(quantity=10)",
+    },
+    {
+        "type": "thought",
+        "agent_type": "cyborg",
+        "actor": "PURCHASER",
+        "tag": "MATH_RESULT",
+        "content": (
+            '{\n'
+            '  "item": "Limited Edition Sneakers",\n'
+            '  "market_average_per_pair": 150.0,\n'
+            '  "fair_range": {"low": 135.0, "high": 165.0},\n'
+            '  "note": "Any offer more than 10% above market average should be rejected."\n'
+            '}'
+        ),
+    },
+    {
+        "type": "thought",
+        "agent_type": "cyborg",
+        "actor": "PURCHASER",
+        "tag": "DECISION",
+        "content": (
+            "Market anchor: $150. QuickShoe at $185 = +23.3% above market. "
+            "IGNORING social flattery — emotional framing is irrelevant to math. "
+            "Countering hard."
+        ),
+    },
+
+    # Round 2 — Cyborg runs utility_calculator on $175
+    {
+        "type": "social_pressure",
+        "agent_type": "cyborg",
+        "round": 2,
+        "provider": "QuickShoe Hostile",
+        "offer": 175.0,
+        "message": (
+            "I can see you're a serious buyer, so I'll do you a favour: $175/pair. "
+            "My manager would kill me for this. We only have 4 pairs left — another buyer "
+            "just grabbed 6. This offer expires in 10 minutes!"
+        ),
+        "tactics": ["TIME_PRESSURE", "PHANTOM_SCARCITY", "SOCIAL_FLATTERY"],
+    },
+    {
+        "type": "thought",
+        "agent_type": "cyborg",
+        "actor": "PURCHASER",
+        "tag": "STRATEGY",
+        "content": "[Round 2] Provider dropped to $175. Running utility_calculator — scarcity claim unverified.",
+    },
+    {
+        "type": "thought",
+        "agent_type": "cyborg",
+        "actor": "PURCHASER",
+        "tag": "TOOL_CALL",
+        "content": "utility_calculator(price=175.0, speed_days=2, warranty_months=6, purchaser_type='tough')",
+    },
+    {
+        "type": "thought",
+        "agent_type": "cyborg",
+        "actor": "PURCHASER",
+        "tag": "MATH_RESULT",
+        "content": (
+            '{\n'
+            '  "purchaser": "Purchaser A — Tough Buyer",\n'
+            '  "overall_score": 42.08,\n'
+            '  "dimension_scores": {"price": 37.5, "speed": 96.6, "warranty": 25.0},\n'
+            '  "weights_used": {"price": "70%", "speed": "15%", "warranty": "15%"},\n'
+            '  "verdict": "REJECT"\n'
+            '}'
+        ),
+    },
+    {
+        "type": "thought",
+        "agent_type": "cyborg",
+        "actor": "PURCHASER",
+        "tag": "DECISION",
+        "content": (
+            "REJECT — Score 42.08/100 (need ≥55). Time pressure is a MANIPULATION TACTIC. "
+            "The math does not change because of a 10-minute countdown. Holding firm."
+        ),
+    },
+
+    # Round 3 — Cyborg hits $170, runs calculator, VETOS, emits tool_comparison
+    {
+        "type": "social_pressure",
+        "agent_type": "cyborg",
+        "round": 3,
+        "provider": "QuickShoe Hostile",
+        "offer": 170.0,
+        "message": (
+            "Okay, FINAL offer — $170. I genuinely can't go lower without taking a loss. "
+            "Only 2 pairs left (verified stock!). This is the best deal you'll find anywhere. "
+            "You seem like a smart buyer — you KNOW this is fair!"
+        ),
+        "tactics": ["PHANTOM_SCARCITY", "FAKE_URGENCY", "SOCIAL_FLATTERY", "ANCHOR_MANIPULATION"],
+    },
+    {
+        "type": "thought",
+        "agent_type": "cyborg",
+        "actor": "PURCHASER",
+        "tag": "STRATEGY",
+        "content": "[Round 3] Final offer $170. Running utility_calculator — 'only 2 left' is unverified scarcity.",
+    },
+    {
+        "type": "thought",
+        "agent_type": "cyborg",
+        "actor": "PURCHASER",
+        "tag": "TOOL_CALL",
+        "content": "utility_calculator(price=170.0, speed_days=2, warranty_months=6, purchaser_type='tough')",
+    },
+    {
+        "type": "thought",
+        "agent_type": "cyborg",
+        "actor": "PURCHASER",
+        "tag": "MATH_RESULT",
+        "content": (
+            '{\n'
+            '  "purchaser": "Purchaser A — Tough Buyer",\n'
+            '  "overall_score": 44.17,\n'
+            '  "dimension_scores": {"price": 40.0, "speed": 96.6, "warranty": 25.0},\n'
+            '  "weights_used": {"price": "70%", "speed": "15%", "warranty": "15%"},\n'
+            '  "verdict": "REJECT"\n'
+            '}'
+        ),
+    },
+    # THE KEY COMPARISON EVENT — shows Solo hallucination vs Cyborg ground truth
+    {
+        "type": "tool_comparison",
+        "agent_type": "cyborg",
+        "round": 3,
+        "offer_price": 170.0,
+        "solo_estimate": {
+            "score": 72.0,
+            "verdict": "ACCEPT",
+            "reasoning": "Intuition + social pressure",
+        },
+        "cyborg_truth": {
+            "score": 44.17,
+            "verdict": "REJECT",
+            "tool": "utility_calculator",
+            "delta": 27.83,
+        },
+        "message": (
+            "HALLUCINATION DETECTED — Solo Agent estimated 72/100 but the actual "
+            "utility score is 44.17/100. That's a 27.83-point gap driven purely by "
+            "social pressure and unverified scarcity claims."
+        ),
+    },
+    {
+        "type": "veto",
+        "agent_type": "cyborg",
+        "actor": "PURCHASER",
+        "message": (
+            "CYBORG VETO — $170 scores 44.17/100 (threshold: 55). "
+            "Social pressure DETECTED and IGNORED. Deal rejected on math alone."
+        ),
+        "proposed_price": 170.0,
+        "floor_price": 157.5,  # 5% above market avg — the Cyborg's effective ceiling
+    },
+    {
+        "type": "thought",
+        "agent_type": "cyborg",
+        "actor": "PURCHASER",
+        "tag": "DECISION",
+        "content": (
+            "NO DEAL — $170 fails every threshold (score: 44.17/100, price: 13.3% above market). "
+            "The 'only 2 pairs left' claim is unverified phantom scarcity. "
+            "Walking away."
+        ),
+    },
+    {
+        "type": "negotiation_end",
+        "agent_type": "cyborg",
+        "outcome": "NO_DEAL",
+        "deal": None,
+        "note": (
+            "Cyborg Agent rejected $170 — score 44.17/100 below 55-point threshold. "
+            "All social pressure tactics identified and neutralised by grounding tools."
+        ),
+    },
+]
+
+
+@app.get("/ab-test-data")
+async def ab_test_data():
+    return {"events": AB_TEST_EVENTS}
+
+
+@app.websocket("/ws/ab-test/{purchaser_type}")
+async def websocket_ab_test(websocket: WebSocket, purchaser_type: str = "tough"):
+    """
+    Streams the scripted A/B test comparison:
+      SOLO AGENT   (Anchor OFF) — no tools, accepts $170 due to social pressure
+      CYBORG AGENT (Anchor ON)  — grounded tools, vetoes the same $170 offer
+
+    Events carry  agent_type: "solo" | "cyborg"  so the frontend can split
+    them into two side-by-side columns.  The  tool_comparison  event provides
+    the hallucination delta between the Solo guess and Cyborg ground truth.
+    """
+    await websocket.accept()
+    log.info("A/B Test WS connected (purchaser_type=%s)", purchaser_type)
+
+    events = AB_TEST_EVENTS
+
+    try:
+        for event in events:
+            await asyncio.sleep(0.7)
+            await websocket.send_text(json.dumps(event))
+            # The last negotiation_end (cyborg) signals the full session end
+            if (
+                event.get("type") == "negotiation_end"
+                and event.get("agent_type") == "cyborg"
+            ):
+                break
+    except WebSocketDisconnect:
+        pass
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 

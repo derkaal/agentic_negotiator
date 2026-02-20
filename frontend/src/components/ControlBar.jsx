@@ -1,5 +1,9 @@
 /**
  * ControlBar — header controls for starting a new negotiation session.
+ *
+ * Includes the A/B Test Anchor toggle:
+ *   [Anchor: ON]  → Cyborg mode — full LangChain StateGraph with tools
+ *   [Anchor: OFF] → Solo mode   — bare LLM, no tools, susceptible to pressure
  */
 
 import React from 'react'
@@ -27,11 +31,15 @@ export default function ControlBar({
   purchaserType,
   currentRound,
   maxRounds = 6,
+  anchorEnabled = true,
   onStart,
   onReset,
   onModeChange,
+  onAnchorToggle,
 }) {
   const isRunning = status === 'running' || status === 'connecting'
+  const isAbTest  = mode === 'ab-test'
+  const isSolo    = mode === 'solo'
 
   return (
     <header className="bg-war-panel border-b border-war-border px-6 py-3">
@@ -68,12 +76,14 @@ export default function ControlBar({
         {/* Row 2: All controls */}
         <div className="flex items-center gap-3 flex-wrap">
 
-          {/* Demo / Live / Hostile mode toggle */}
+          {/* Mode toggle: Demo / Live / Hostile / Solo / A-B Test */}
           <div className="flex rounded-lg border border-war-border overflow-hidden flex-shrink-0">
             {[
               { id: 'demo',    label: '🎬 Demo',    activeClass: 'bg-war-purple text-white' },
               { id: 'live',    label: '🤖 Live',    activeClass: 'bg-war-green  text-black' },
               { id: 'hostile', label: '☠ Hostile', activeClass: 'bg-war-red    text-white' },
+              { id: 'solo',    label: '🧠 Solo',    activeClass: 'bg-orange-600 text-white' },
+              { id: 'ab-test', label: '⚗️ A/B Test', activeClass: 'bg-violet-700 text-white' },
             ].map(({ id, label, activeClass }) => (
               <button
                 key={id}
@@ -90,6 +100,58 @@ export default function ControlBar({
               </button>
             ))}
           </div>
+
+          {/* ── Anchor Toggle ── (shown for all modes except hostile) */}
+          {mode !== 'hostile' && mode !== 'ab-test' && (
+            <div className="flex items-center gap-2 flex-shrink-0">
+              <span className="text-xs text-gray-500 font-mono">Anchor:</span>
+              <button
+                disabled={isRunning}
+                onClick={() => !isRunning && onAnchorToggle?.(!anchorEnabled)}
+                className={clsx(
+                  'relative inline-flex h-6 w-11 items-center rounded-full transition-colors duration-200 focus:outline-none flex-shrink-0',
+                  anchorEnabled
+                    ? 'bg-cyan-600 disabled:opacity-60'
+                    : 'bg-orange-700/80 disabled:opacity-60',
+                  isRunning && 'cursor-not-allowed',
+                )}
+                title={anchorEnabled
+                  ? 'Anchor ON — Cyborg mode: tools enabled, grounded'
+                  : 'Anchor OFF — Solo mode: no tools, susceptible to pressure'}
+              >
+                <span
+                  className={clsx(
+                    'inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform duration-200',
+                    anchorEnabled ? 'translate-x-6' : 'translate-x-1',
+                  )}
+                />
+              </button>
+              <span className={clsx(
+                'text-xs font-bold font-mono whitespace-nowrap',
+                anchorEnabled ? 'text-cyan-400' : 'text-orange-400',
+              )}>
+                {anchorEnabled ? 'ON (Cyborg)' : 'OFF (Solo)'}
+              </span>
+            </div>
+          )}
+
+          {/* A/B Test indicator (non-interactive) */}
+          {isAbTest && (
+            <div className="flex items-center gap-2 flex-shrink-0">
+              <span className="bg-violet-900/60 border border-violet-600/50 text-violet-300 text-xs font-bold px-2 py-1 rounded font-mono">
+                SOLO vs CYBORG
+              </span>
+              <span className="text-violet-400 text-xs font-mono">comparison active</span>
+            </div>
+          )}
+
+          {/* Solo mode indicator */}
+          {isSolo && (
+            <div className="flex items-center gap-1.5 flex-shrink-0">
+              <span className="w-2 h-2 rounded-full bg-orange-500 animate-pulse" />
+              <span className="text-orange-400 text-xs font-mono font-bold">UNGROUNDED</span>
+            </div>
+          )}
 
           {/* Purchaser type toggle */}
           <div className="flex rounded-lg border border-war-border overflow-hidden flex-shrink-0">
@@ -124,6 +186,10 @@ export default function ControlBar({
                 ? 'bg-war-red text-white hover:bg-red-600 active:scale-95'
                 : mode === 'live'
                 ? 'bg-war-green text-black hover:bg-emerald-400 active:scale-95'
+                : mode === 'solo'
+                ? 'bg-orange-600 text-white hover:bg-orange-500 active:scale-95'
+                : mode === 'ab-test'
+                ? 'bg-violet-700 text-white hover:bg-violet-600 active:scale-95'
                 : 'bg-war-purple text-white hover:bg-purple-500 active:scale-95'
             )}
           >
@@ -133,6 +199,10 @@ export default function ControlBar({
               ? '☠ Launch Attack'
               : mode === 'live'
               ? '▶ Run Live'
+              : mode === 'solo'
+              ? '🧠 Run Solo'
+              : mode === 'ab-test'
+              ? '⚗️ Run A/B Test'
               : '▶ Play Demo'
             }
           </button>
