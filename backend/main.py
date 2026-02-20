@@ -898,6 +898,75 @@ async def websocket_task(
 
 
 # ---------------------------------------------------------------------------
+# N-to-N Market (MBMPMS) endpoint
+# ---------------------------------------------------------------------------
+
+try:
+    from market_tasks import run_market_3x3, BUYER_CONFIGS, SELLER_CONFIGS
+    _MARKET_AVAILABLE = True
+except Exception as _mkt_err:  # noqa: BLE001
+    log.warning("Market tasks unavailable: %s", _mkt_err)
+    _MARKET_AVAILABLE = False
+
+
+@app.websocket("/ws/market/{scenario}")
+async def websocket_market(websocket: WebSocket, scenario: str = "used_car"):
+    """
+    Run an N-to-N MBMPMS market simulation and stream events.
+
+    scenario: 'used_car'  (3 Buyers × 3 Sellers, Honda Civic 2021)
+
+    Event types:
+      market_start, market_round, pair_update, market_switch,
+      deal_closed, deal_rate, market_score, market_end
+    """
+    await websocket.accept()
+    log.info("Market WS connected (scenario=%s)", scenario)
+
+    if not _MARKET_AVAILABLE:
+        await websocket.send_text(json.dumps({
+            "type": "error",
+            "message": "Market tasks not available (import error).",
+        }))
+        await websocket.close()
+        return
+
+    supported = {"used_car"}
+    if scenario not in supported:
+        await websocket.send_text(json.dumps({
+            "type": "error",
+            "message": f"Unknown scenario '{scenario}'. Supported: {sorted(supported)}",
+        }))
+        await websocket.close()
+        return
+
+    try:
+        async for event in run_market_3x3(scenario=scenario):
+            await websocket.send_text(json.dumps(event))
+            await asyncio.sleep(0)
+    except WebSocketDisconnect:
+        log.info("Market WS disconnected (scenario=%s)", scenario)
+    except Exception as exc:  # noqa: BLE001
+        log.exception("Market WS error: %s", exc)
+        try:
+            await websocket.send_text(json.dumps({"type": "error", "message": str(exc)}))
+        except Exception:
+            pass
+
+
+@app.get("/market-config")
+async def market_config():
+    """Return buyer/seller configurations for the market scenario."""
+    if not _MARKET_AVAILABLE:
+        return {"available": False}
+    return {
+        "available": True,
+        "buyers": list(BUYER_CONFIGS.values()),
+        "sellers": list(SELLER_CONFIGS.values()),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 

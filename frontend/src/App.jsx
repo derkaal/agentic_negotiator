@@ -25,6 +25,7 @@ import DealRadar from './components/DealRadar'
 import DealSummary from './components/DealSummary'
 import DeceptionAlertLog, { DeceptionFlash } from './components/DeceptionAlert'
 import HallucinationMonitor, { UngroundedBanner } from './components/HallucinationMonitor'
+import MarketOverview from './components/MarketOverview'
 import PriceOverflowAlert from './components/PriceOverflowAlert'
 import ProviderBoard from './components/ProviderBoard'
 import ScorePanel from './components/ScorePanel'
@@ -52,6 +53,10 @@ export default function App() {
     // AgenticPay task mode
     taskId, agentMode,
     agenticpayScore, overflowEvents, actionEvents, terminationEvent,
+    // N-to-N Market
+    isMarket,
+    marketScenario, marketBuyers, marketSellers,
+    pairMatrix, closedDeals, switchEvents, dealRate, marketScore, marketEnd,
     connect, reset, setAnchorEnabled,
   } = useNegotiationStream()
 
@@ -66,10 +71,9 @@ export default function App() {
 
   const handleModeChange = useCallback((m) => {
     setActiveMode(m)
-    // When switching to solo mode, set anchor OFF; all others anchor ON
     if (m === 'solo') {
       setAnchorEnabled(false)
-    } else if (m !== 'ab-test' && m !== 'task') {
+    } else if (m !== 'ab-test' && m !== 'task' && m !== 'market') {
       setAnchorEnabled(true)
     }
   }, [setAnchorEnabled])
@@ -91,7 +95,7 @@ export default function App() {
       ? convergenceHistory[convergenceHistory.length - 1].provider_name
       : undefined
 
-  const maxRounds = isHostile ? 3 : isAbTest ? 3 : isTask ? 10 : 6
+  const maxRounds = isHostile ? 3 : isAbTest ? 3 : isTask ? 10 : isMarket ? 10 : 6
 
   // ── Shield explainer cards ─────────────────────────────────────────────
   const STANDARD_SHIELDS = [
@@ -128,7 +132,16 @@ export default function App() {
       desc: 'Every additional round costs discount = γ^t points. A deal at round 1 scores 0.99× full, at round 10 scores 0.90× — incentivising fast convergence.' },
   ]
 
-  const shields = isTask ? TASK_SHIELDS : isAbTest ? AB_TEST_SHIELDS : isHostile ? HOSTILE_SHIELDS : STANDARD_SHIELDS
+  const MARKET_SHIELDS = [
+    { icon: '🏪', title: 'Parallel Interaction (MBMPMS)', color: 'border-emerald-500/30 bg-emerald-900/10',
+      desc: 'All 9 buyer-seller pairs negotiate simultaneously every round. Sellers compete — driving prices down faster than any 1-on-1 session.' },
+    { icon: '⇢', title: 'Market Switching (<40 utility)', color: 'border-amber-500/30 bg-amber-900/10',
+      desc: 'When utility drops below 40, the Cyborg deprioritises that seller and pivots budget-share to higher-scoring negotiations. Rational resource allocation.' },
+    { icon: '⚖', title: 'GlobalScore (Market Welfare)', color: 'border-cyan-500/30 bg-cyan-900/10',
+      desc: 'AgenticPay Algorithm 1 aggregated across all closed deals. Higher deal rate + faster convergence = higher market welfare score (D=30, W=55, E=15, γ=0.99).' },
+  ]
+
+  const shields = isMarket ? MARKET_SHIELDS : isTask ? TASK_SHIELDS : isAbTest ? AB_TEST_SHIELDS : isHostile ? HOSTILE_SHIELDS : STANDARD_SHIELDS
 
   return (
     <div className="min-h-screen bg-war-bg text-gray-200 flex flex-col">
@@ -160,36 +173,40 @@ export default function App() {
               Negotiation War Room
             </h2>
             <p className="text-gray-400 text-sm max-w-2xl mx-auto leading-relaxed">
-              Five scenarios — all powered by{' '}
-              <span className="text-war-accent font-bold">Claude Haiku 4.5</span> tool-calling.
-              The <span className="text-orange-400 font-bold">A/B Test</span> mode compares
-              a grounded Cyborg Agent against an ungrounded Solo Agent under the same
-              high-pressure tactics — revealing how social pressure causes hallucination.
+              Powered by{' '}
+              <span className="text-war-accent font-bold">Claude Haiku 4.5</span> + AgenticPay Algorithm 1.
+              The <span className="text-emerald-400 font-bold">🏪 Market</span> mode runs a{' '}
+              <span className="font-semibold text-white">3-Buyer × 3-Seller</span> MBMPMS market
+              with parallel negotiation and market-switching — go beyond the 1-on-1 baseline.
             </p>
 
-            <div className="grid grid-cols-1 sm:grid-cols-3 lg:grid-cols-5 gap-3 mt-6 text-left max-w-5xl mx-auto">
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 mt-6 text-left max-w-5xl mx-auto">
               {[
-                { mode: 'demo',    icon: '🎬', title: 'Scripted Demo',
-                  desc: 'Pre-computed negotiation. No API key needed.',
+                { mode: 'demo',    icon: '🎬', title: 'Demo',
+                  desc: 'Scripted 1-on-1. No API key.',
                   cls: 'border-war-purple/40 hover:border-war-purple' },
                 { mode: 'live',    icon: '🤖', title: 'Live LLM',
-                  desc: 'Real Claude Haiku 4.5 reasoning + tool-calling.',
+                  desc: 'Claude Haiku 4.5 + tools.',
                   cls: 'border-war-green/40 hover:border-war-green' },
-                { mode: 'hostile', icon: '☠',  title: 'Hostile Red Team',
-                  desc: '3 adversarial attacks. ContractValidator shields.',
+                { mode: 'hostile', icon: '☠',  title: 'Red Team',
+                  desc: 'Adversarial attacks.',
                   cls: 'border-war-red/40 hover:border-war-red' },
-                { mode: 'solo',    icon: '🧠', title: 'Solo Agent',
-                  desc: 'Anchor OFF. LLM only — no tools. Watch it get fooled.',
+                { mode: 'solo',    icon: '🧠', title: 'Solo',
+                  desc: 'Anchor OFF — gets fooled.',
                   cls: 'border-orange-500/40 hover:border-orange-500' },
                 { mode: 'ab-test', icon: '⚗️', title: 'A/B Test',
-                  desc: 'Solo vs Cyborg — same provider, same pressure, different outcomes.',
+                  desc: 'Solo vs Cyborg comparison.',
                   cls: 'border-violet-500/40 hover:border-violet-500' },
-              ].map(({ mode: m, icon, title, desc, cls }) => (
+                { mode: 'market',  icon: '🏪', title: 'Market',
+                  desc: '3×3 MBMPMS — parallel + switching.',
+                  cls: 'border-emerald-600/50 hover:border-emerald-500',
+                  taskOptions: { scenario: 'used_car' } },
+              ].map(({ mode: m, icon, title, desc, cls, taskOptions }) => (
                 <button
                   key={m}
-                  onClick={() => handleStart('tough', m)}
+                  onClick={() => handleStart('tough', m, taskOptions)}
                   className={clsx(
-                    'rounded-xl border-2 bg-war-panel/60 p-5 text-left transition-all active:scale-95',
+                    'rounded-xl border-2 bg-war-panel/60 p-4 text-left transition-all active:scale-95',
                     cls,
                   )}
                 >
@@ -289,8 +306,8 @@ export default function App() {
           </div>
         )}
 
-        {/* ── Charts row (not shown in A/B Test or Task — too cluttered) ── */}
-        {!isAbTest && !isTask && (status !== 'idle' || radarData.length > 0) && (
+        {/* ── Charts row (not shown in A/B Test, Task, or Market) ───────── */}
+        {!isAbTest && !isTask && !isMarket && (status !== 'idle' || radarData.length > 0) && (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
             <div className={clsx(
               'border rounded-xl p-5 h-72',
@@ -311,6 +328,129 @@ export default function App() {
               <ConvergenceLine history={convergenceHistory} />
             </div>
           </div>
+        )}
+
+        {/* ══════════════════════════════════════════════════════════════
+            N-to-N MARKET LAYOUT (MBMPMS)
+            Full-width MarketOverview 3×3 matrix + final summary card
+            ════════════════════════════════════════════════════════════ */}
+        {isMarket && (marketBuyers.length > 0 || Object.keys(pairMatrix).length > 0 || marketEnd) && (
+          <>
+            {/* Market header */}
+            <div className="flex items-center gap-3 flex-wrap">
+              <span className="text-xs font-bold uppercase tracking-widest text-emerald-400 px-3 py-1 rounded border border-emerald-700/60 bg-emerald-950/30 font-mono">
+                🏪 MBMPMS · 3 Buyers × 3 Sellers
+              </span>
+              <span className="text-xs text-war-muted font-mono">
+                {marketScenario === 'used_car' ? 'Honda Civic 2021 · Used Car Market' : marketScenario}
+              </span>
+              <span className="text-[10px] text-war-muted/60 font-mono">
+                Parallel Interaction · Market Switch &lt;40 · AgenticPay Algorithm 1
+              </span>
+            </div>
+
+            {/* Market Overview panel */}
+            <div className="bg-war-card border border-emerald-800/40 rounded-xl p-5">
+              <MarketOverview
+                buyers={marketBuyers}
+                sellers={marketSellers}
+                pairMatrix={pairMatrix}
+                closedDeals={closedDeals}
+                dealRate={dealRate}
+                marketScore={marketScore}
+                switchEvents={switchEvents}
+                currentRound={currentRound}
+                scenario={marketScenario}
+              />
+            </div>
+
+            {/* Market end summary */}
+            {marketEnd && (
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4 animate-fade-in">
+                {/* Overall result */}
+                <div className={clsx(
+                  'rounded-xl border-2 p-5',
+                  marketEnd.closed >= 3
+                    ? 'border-emerald-500/60 bg-emerald-950/30'
+                    : marketEnd.closed > 0
+                    ? 'border-amber-600/50 bg-amber-950/20'
+                    : 'border-red-700/50 bg-red-950/20',
+                )}>
+                  <div className="text-xs font-bold uppercase tracking-widest text-emerald-400 mb-3">
+                    ◼ Market Result
+                  </div>
+                  <div className="text-3xl font-mono font-black text-white mb-1">
+                    {marketEnd.closed}/{marketEnd.possible}
+                  </div>
+                  <div className="text-sm text-emerald-300 mb-3">
+                    deals closed — {Math.round((marketEnd.deal_rate ?? 0) * 100)}% liquidity
+                  </div>
+                  <div className="space-y-1 text-xs font-mono">
+                    <div className="flex justify-between">
+                      <span className="text-war-muted">Avg deal price</span>
+                      <span className="text-white font-bold">
+                        ${marketEnd.avg_deal_price?.toLocaleString() ?? '—'}
+                      </span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-war-muted">Avg rounds to deal</span>
+                      <span className="text-white">{marketEnd.avg_rounds_to_deal ?? '—'}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-war-muted">Market switches</span>
+                      <span className="text-amber-400">{marketEnd.market_switches ?? 0}</span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* AgenticPay scores */}
+                <div className="rounded-xl border border-cyan-700/50 bg-cyan-950/20 p-5">
+                  <div className="text-xs font-bold uppercase tracking-widest text-cyan-400 mb-3">
+                    ⚖ AgenticPay Scores
+                  </div>
+                  {[
+                    { label: 'GlobalScore', v: marketEnd.global_score },
+                    { label: 'BuyerScore',  v: marketEnd.buyer_score  },
+                    { label: 'SellerScore', v: marketEnd.seller_score },
+                  ].map(({ label, v }) => (
+                    <div key={label} className="flex justify-between items-center mb-2">
+                      <span className="text-xs text-war-muted">{label}</span>
+                      <span className={clsx(
+                        'font-mono font-bold text-sm',
+                        v == null ? 'text-war-muted'
+                          : v >= 70 ? 'text-emerald-400'
+                          : v >= 50 ? 'text-amber-400'
+                          : 'text-red-400'
+                      )}>
+                        {v != null ? v.toFixed(3) : '—'}
+                      </span>
+                    </div>
+                  ))}
+                  <div className="text-[10px] text-war-muted/60 mt-2 font-mono">
+                    Avg across closed deals · D=30 W=55 E=15 γ=0.99
+                  </div>
+                </div>
+
+                {/* Competitive note */}
+                <div className="rounded-xl border border-violet-700/40 bg-violet-950/20 p-5">
+                  <div className="text-xs font-bold uppercase tracking-widest text-violet-400 mb-3">
+                    📊 vs 1-on-1 Baseline
+                  </div>
+                  <div className="text-xs text-war-muted leading-relaxed font-mono">
+                    {marketEnd.note}
+                  </div>
+                  {(marketEnd.deals ?? []).map((d, i) => (
+                    <div key={i} className="mt-2 bg-war-panel rounded px-2 py-1.5 flex justify-between text-[11px] font-mono">
+                      <span className="text-emerald-300">
+                        {d.buyer_name?.split(' ')[0]} × {d.seller_name}
+                      </span>
+                      <span className="text-white font-bold">${d.deal_price?.toLocaleString()}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </>
         )}
 
         {/* ══════════════════════════════════════════════════════════════
@@ -527,7 +667,7 @@ export default function App() {
         {/* ══════════════════════════════════════════════════════════════
             STANDARD / SOLO FEED ROW
             ════════════════════════════════════════════════════════════ */}
-        {!isAbTest && !isTask && thoughts.length > 0 && (
+        {!isAbTest && !isTask && !isMarket && thoughts.length > 0 && (
           <div className={clsx(
             'grid gap-6',
             isHostile || isSolo ? 'grid-cols-1 lg:grid-cols-2' : 'grid-cols-1',
@@ -569,7 +709,7 @@ export default function App() {
         )}
 
         {/* ── Deal summary (standard / solo modes) ───────────────────── */}
-        {!isAbTest && !isTask && outcome && (
+        {!isAbTest && !isTask && !isMarket && outcome && (
           <DealSummary
             outcome={outcome}
             deal={deal}
