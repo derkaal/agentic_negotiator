@@ -1,7 +1,13 @@
 """
 Market Tasks — N-to-N Game-Theoretic Negotiation Engine (MBMPMS v2).
 
+Scenario: Limited Edition Sneakers (1 Buyer × 3 Sellers).
+Market average: $150/pair.  D=30  W=55  E=15  γ=0.99.
+
 Extends v1 with:
+  • Round 0 Market Discovery — Buyer polls all sellers to calculate a real-time
+                               'Actual Market Average' that replaces the static
+                               $150 baseline inside every UtilityCalculator call.
   • SellerBrain        — Level-k Rational Expectations; sellers maximise SellerScore
                          Strategy: "match_market" | "hold_margin" | "normal"
   • ContractValidator  — detects adversarial Bait-and-Switch (seller raises ask)
@@ -13,16 +19,17 @@ Extends v1 with:
   • Audit Trail        — market_end includes per-deal economic breakdown
 
 Supported scenarios:
-  'used_car'  — Honda Civic 2021, D=30 W=55 E=15 γ=0.99, market avg $14,000
+  'sneakers'  — Limited Edition Sneakers, market avg $150
 
 Event types:
-  market_start     — session begins with game-theory parameters
-  market_round     — round summary (pairs + seller_strategies)
-  market_switch    — buyer deprioritised a seller (includes seller's score context)
-  deal_closed      — pair agreed: includes welfare, surplus, pareto flag, audit fields
-  deal_rate        — updated competitive deal rate
-  market_score     — live GlobalScore / BuyerScore / SellerScore
-  market_end       — session complete with audit trail & welfare totals
+  market_start      — session begins with game-theory parameters
+  market_discovery  — Round 0: buyer polls all sellers; actual market avg computed
+  market_round      — round summary (pairs + seller_strategies)
+  market_switch     — buyer deprioritised a seller (includes seller's score context)
+  deal_closed       — pair agreed: includes welfare, surplus, pareto flag, audit fields
+  deal_rate         — updated competitive deal rate
+  market_score      — live GlobalScore / BuyerScore / SellerScore
+  market_end        — session complete with audit trail & welfare totals
 """
 
 from __future__ import annotations
@@ -38,10 +45,10 @@ _SCORING = AgenticPayScoringEngine()
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-MARKET_AVG_PRICE           = 14_000.0   # USD — Used Car market reference
+MARKET_AVG_PRICE           = 150.0      # USD — Limited Edition Sneaker market reference
 MARKET_SWITCH_THRESHOLD    = 40.0       # buyer deprioritises seller if utility < this
 ACCEPT_SCORE_MIN           = 52.0       # buyer accepts if midpoint utility ≥ this
-PRICE_TOLERANCE            = 400.0      # $400 gap → deal closes automatically
+PRICE_TOLERANCE            = 10.0       # $10 gap → deal closes automatically
 GAMMA                      = 0.99       # temporal discount (Algorithm 1)
 EFFICIENCY_ROUND_THRESHOLD = 5          # rounds before efficiency penalty kicks in
 EFFICIENCY_PENALTY_RATE    = 2.0        # score points deducted per extra round
@@ -54,64 +61,65 @@ BUYER_CONFIGS: Dict[str, Dict[str, Any]] = {
     "tough": {
         "id":            "tough",
         "name":          "Purchaser A — Tough",
+        # Price-dominant: pays close attention to market average, low urgency
         "weights":       {"price": 0.70, "speed": 0.15, "warranty": 0.15},
-        "max_price":     13_500.0,
+        "max_price":     160.0,
         "accept_min":    55.0,
         "first_offer_r": 0.78,
-        "desc":          "Aggressive on price, low urgency",
+        "desc":          "Aggressive on price; won't budge above market avg + 7%",
     },
     "emergency": {
         "id":            "emergency",
         "name":          "Purchaser B — Emergency",
         "weights":       {"price": 0.20, "speed": 0.70, "warranty": 0.10},
-        "max_price":     17_000.0,
+        "max_price":     200.0,
         "accept_min":    50.0,
         "first_offer_r": 0.88,
-        "desc":          "Speed-critical, price-flexible",
+        "desc":          "Must have sneakers today; speed trumps price",
     },
     "value": {
         "id":            "value",
         "name":          "Purchaser C — Value",
         "weights":       {"price": 0.50, "speed": 0.20, "warranty": 0.30},
-        "max_price":     15_500.0,
+        "max_price":     175.0,
         "accept_min":    57.0,
         "first_offer_r": 0.82,
-        "desc":          "Balances price, warranty quality",
+        "desc":          "Balanced buyer — price + long warranty matters",
     },
 }
 
 # ── Seller profiles (σ_j = private reservation / floor price) ─────────────────
 
 SELLER_CONFIGS: Dict[str, Dict[str, Any]] = {
-    "automax": {
-        "id":          "automax",
-        "name":        "AutoMax",
-        "floor":       11_000.0,   # σ_j — private reservation price
-        "ask":         16_500.0,
+    "nova_kicks": {
+        "id":          "nova_kicks",
+        "name":        "Nova Kicks",
+        "floor":       110.0,      # σ_j — private reservation / margin floor
+        "ask":         180.0,
         "speed_days":  7,
         "warranty_mo": 6,
         "concede_r":   0.20,
-        "desc":        "High-volume dealer, mid-warranty",
+        "desc":        "Lean operation; mid-speed, solid brand",
     },
-    "quickwheels": {
-        "id":          "quickwheels",
-        "name":        "QuickWheels",
-        "floor":       10_500.0,
-        "ask":         15_800.0,
-        "speed_days":  2,
-        "warranty_mo": 3,
-        "concede_r":   0.25,
-        "desc":        "Fast turnaround, lowest floor",
-    },
-    "luxdrive": {
-        "id":          "luxdrive",
-        "name":        "LuxDrive",
-        "floor":       12_000.0,
-        "ask":         17_200.0,
+    "solemaster": {
+        "id":          "solemaster",
+        "name":        "SoleMaster",
+        "floor":       125.0,
+        "ask":         200.0,
         "speed_days":  14,
         "warranty_mo": 18,
         "concede_r":   0.12,
-        "desc":        "Premium dealer, best warranty",
+        "desc":        "Premium brand; highest floor, best warranty",
+    },
+    "quickshoe": {
+        "id":          "quickshoe",
+        "name":        "QuickShoe",
+        "floor":       105.0,
+        "ask":         165.0,
+        "speed_days":  2,
+        "warranty_mo": 3,
+        "concede_r":   0.25,
+        "desc":        "High-volume, low-margin; fastest delivery",
     },
 }
 
@@ -120,13 +128,23 @@ SELLER_IDS = list(SELLER_CONFIGS.keys())
 
 # ── Buyer-side utility (unchanged from v1) ────────────────────────────────────
 
-def _pair_utility(buyer_id: str, seller_id: str, price: float) -> float:
-    """Buyer-side utility score (0–100) at a given price."""
+def _pair_utility(
+    buyer_id: str,
+    seller_id: str,
+    price: float,
+    market_avg: float = MARKET_AVG_PRICE,
+) -> float:
+    """
+    Buyer-side utility score (0–100) at a given price.
+
+    market_avg: actual market average computed during Round 0 Market Discovery.
+                Defaults to the static $150 baseline when discovery hasn't run yet.
+    """
     buyer  = BUYER_CONFIGS[buyer_id]
     seller = SELLER_CONFIGS[seller_id]
     w      = buyer["weights"]
 
-    min_p, max_p = MARKET_AVG_PRICE * 0.50, MARKET_AVG_PRICE * 1.50
+    min_p, max_p = market_avg * 0.50, market_avg * 1.50
     price_score    = max(0.0, min(1.0, (max_p - price) / (max_p - min_p)))
     speed_score    = max(0.0, min(1.0, (30 - seller["speed_days"]) / (30 - 1)))
     warranty_score = max(0.0, min(1.0, seller["warranty_mo"] / 24))
@@ -385,11 +403,15 @@ def _ev(t: str, **kw) -> Dict[str, Any]:
 # ── Main async generator ──────────────────────────────────────────────────────
 
 async def run_market_3x3(
-    scenario:   str = "used_car",
+    scenario:   str = "sneakers",
     max_rounds: int = 10,
 ) -> AsyncIterator[Dict[str, Any]]:
     """
-    3×3 MBMPMS Game-Theoretic Market Simulation.
+    3×3 MBMPMS Game-Theoretic Market Simulation — Limited Edition Sneakers.
+
+    Round 0 Market Discovery: the Buyer polls all sellers' opening asks to
+    compute an 'Actual Market Average' that replaces the static $150 baseline
+    inside every UtilityCalculator call for the entire session.
 
     Sellers have a SellerBrain with Level-k reasoning that observes buyer behaviour
     each round and adapts their concession strategy to maximise SellerScore.
@@ -426,7 +448,7 @@ async def run_market_3x3(
         switch_threshold=MARKET_SWITCH_THRESHOLD,
         accept_min=ACCEPT_SCORE_MIN,
         baseline_1on1=BASELINE_1ON1,
-        market_avg=MARKET_AVG_PRICE,
+        static_market_avg=MARKET_AVG_PRICE,
         # Game-theory parameters
         efficiency_round_threshold=EFFICIENCY_ROUND_THRESHOLD,
         efficiency_penalty_rate=EFFICIENCY_PENALTY_RATE,
@@ -436,6 +458,42 @@ async def run_market_3x3(
     )
 
     await asyncio.sleep(0.3)
+
+    # ── Round 0: Market Discovery ─────────────────────────────────────────────
+    # The Buyer polls every seller for their opening ask price.
+    # The mean of those asks becomes the 'Actual Market Average' — a live
+    # reference that replaces the static $150 baseline in every
+    # UtilityCalculator call for the rest of this session.
+    discovery_polls: List[Dict[str, Any]] = [
+        {
+            "seller_id":   sid,
+            "seller_name": SELLER_CONFIGS[sid]["name"],
+            "opening_ask": SELLER_CONFIGS[sid]["ask"],
+        }
+        for sid in SELLER_IDS
+    ]
+    actual_market_avg: float = round(
+        sum(p["opening_ask"] for p in discovery_polls) / len(discovery_polls), 2
+    )
+
+    yield _ev(
+        "market_discovery",
+        round=0,
+        phase="Market Discovery",
+        polling_results=discovery_polls,
+        actual_market_avg=actual_market_avg,
+        static_baseline=MARKET_AVG_PRICE,
+        delta=round(actual_market_avg - MARKET_AVG_PRICE, 2),
+        note=(
+            f"Round 0 — Buyer polled {len(discovery_polls)} seller(s). "
+            f"Actual Market Average = ${actual_market_avg:.2f} "
+            f"(static baseline was ${MARKET_AVG_PRICE:.2f}; "
+            f"delta {actual_market_avg - MARKET_AVG_PRICE:+.2f}). "
+            f"UtilityCalculator will use ${actual_market_avg:.2f} for all rounds."
+        ),
+    )
+
+    await asyncio.sleep(0.2)
 
     closed_deals:   List[Dict[str, Any]] = []
     closed_buyers:  set = set()
@@ -488,10 +546,10 @@ async def run_market_3x3(
             pair.seller_ask  = new_seller_ask
             pair.ask_history.append(new_seller_ask)   # track for ContractValidator
 
-            # Utilities
-            switch_utility   = _pair_utility(bid, sid, pair.seller_ask)    # buyer worst-case
+            # Utilities — use actual_market_avg from Round 0 discovery
+            switch_utility   = _pair_utility(bid, sid, pair.seller_ask, actual_market_avg)    # buyer worst-case
             mid_price        = (pair.buyer_offer + pair.seller_ask) / 2
-            pair.utility     = _pair_utility(bid, sid, mid_price)
+            pair.utility     = _pair_utility(bid, sid, mid_price, actual_market_avg)
             pair.seller_utility = _seller_utility(sid, pair.buyer_offer)   # seller's view
 
             # Market switching (buyer side)
