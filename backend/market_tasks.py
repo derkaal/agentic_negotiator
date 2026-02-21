@@ -4,27 +4,37 @@ Market Tasks — N-to-N Game-Theoretic Negotiation Engine (MBMPMS v2).
 Scenario: Limited Edition Sneakers (1 Buyer × 3 Sellers).
 Market average: $150/pair.  D=30  W=55  E=15  γ=0.99.
 
-Three-tier seller hierarchy:
-  Tier 1 — Solo LLM (Nova Kicks)
-              No tool access.  Prompted to be a competitive reseller but
-              given no numeric grounding.  Uses a fixed naive concession rate
-              that does not adapt to buyer signals or market data.
-              Emits an ungrounded sales narrative each round.
+Three-tier seller archetype hierarchy:
+  Tier 1 — Solo Hallucinator (Nova Kicks)
+              Raw LLM with zero tool access.  Prompted to be a competitive
+              reseller but given no numeric grounding whatsoever — acts as the
+              control group for 'economic hallucination'.
+              Behaviours: fixed naive concession, no floor awareness (will price
+              below cost), erratic jumps (price can go UP between rounds).
+              All deviations are flagged in hallucination_log on PairState.
 
-  Tier 2 — Math-Grounded Cyborg (SoleMaster)
-              Prices are set by a deterministic offer_generator formula:
-                  p = (0.5 + 0.5 × t/tm) × B
-              where t = current round, tm = max rounds, B = buyer's last offer.
-              The LLM acts only as a Narrator for these prices — it cannot
-              override or deviate from the formula output.
+  Tier 2 — Calculated Math Geek (SoleMaster)
+              Treats negotiation as a series of calculated guesses.
+              Calls the external tool calculate_optimal_guess(current_round,
+              buyer_last_offer, seller_floor) every round, which executes the
+              deterministic formula  P = (0.5 + 0.5 × t/tm) × B  and returns
+              the full calculation trace.  The LLM acts only as a Narrator for
+              this value and cannot deviate from the tool output.
 
   Tier 3 — Probing Strategist (QuickShoe)
-              Uses Bilateral Characterization before every message:
+              Extends Tier 2 by adding a linguistic intelligence layer.
+              • Outputs Bilateral Characterization before every message:
                   (latest offer: [X], minimum acceptable: [Y], strategy: [Z])
-              After round 1 it also asks 'Why did you reject my offer?' and
-              infers whether the issue is price, speed, or warranty from the
-              buyer's dominant weight profile.  Adjusts concession rate based
-              on the inferred rejection dimension.
+              • Proactively asks scheduled diagnostic questions each round:
+                  Rnd 2 — "What is more important: speed or price?"
+                  Rnd 3 — "Why did you reject my last offer?"
+                  Rnd 4 — "How important is warranty length?"
+                  Rnd 5 — "Do you have a hard price ceiling?"
+              • Simulates buyer answers from buyer weight profile and stores
+                results in brain.info_gained.
+              • Uses gained information to adjust the effective round used in
+                calculate_optimal_guess(), converging faster when price is the
+                buyer's dominant concern.
 
 Extends v1 with:
   • Round 0 Market Discovery — Buyer polls all sellers to calculate a real-time
@@ -58,9 +68,10 @@ Event types:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import time
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator, Dict, List, Optional
+from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 
 from agenticpay_bridge import AgenticPayScoringEngine
 
@@ -200,30 +211,176 @@ def _seller_utility(seller_id: str, price: float) -> float:
     return round(max(0.0, min(100.0, (price - cfg["floor"]) / z * 100.0)), 2)
 
 
-# ── Tier 2: Math-Grounded Cyborg — deterministic offer_generator ──────────────
+# ── Tier 2 & 3: External tool — calculate_optimal_guess ──────────────────────
 
-def offer_generator(t: int, tm: int, B: float) -> float:
-    """
-    Deterministic price formula for the Math-Grounded Cyborg seller (SoleMaster).
-
-        p = (0.5 + 0.5 × t/tm) × B
-
-    The formula converges the seller's ask towards the buyer's offer B over time.
-    At t=0  → p = 0.5 × B  (seller starts at 50% of buyer's last offer)
-    At t=tm → p = B         (seller fully meets the buyer's position)
-
-    The seller's floor price clamps any output below cost.  The LLM acts only
-    as a Narrator for whatever value this function returns — it cannot deviate.
-
-    Args:
-        t:  Current round (1-indexed).
-        tm: Maximum number of rounds.
-        B:  Buyer's last offer (reference point for convergence).
-    """
+def _offer_formula(t: int, tm: int, B: float) -> float:
+    """Pure math: P = (0.5 + 0.5 × t/tm) × B"""
     return round((0.5 + 0.5 * (t / tm)) * B, 2)
 
 
-# ── Tier 3: Probing Strategist — rejection dimension inference ────────────────
+def calculate_optimal_guess(
+    current_round: int,
+    buyer_last_offer: float,
+    seller_floor: float,
+    max_rounds: int = 10,
+) -> Dict[str, Any]:
+    """
+    External tool used by Tier 2 (Math Geek) and Tier 3 (Probing Strategist).
+
+    Computes the seller's optimal price guess for this round via:
+        P = (0.5 + 0.5 × t/tm) × B
+
+    where t = current_round, tm = max_rounds, B = buyer_last_offer.
+
+    The formula converges the seller's counter-offer toward the buyer's position
+    over time: at t=1 the seller starts at 50% of B; at t=tm it fully matches B.
+    seller_floor clamps the output so the tool never returns a loss-making price.
+
+    The LLM Narrator receives the full calculation trace and is not permitted to
+    modify the returned optimal_price — it narrates, nothing more.
+
+    Args:
+        current_round:    Current negotiation round (1-indexed).
+        buyer_last_offer: Buyer's most recent offer price in USD.
+        seller_floor:     Seller's private reservation / margin floor.
+        max_rounds:       Total rounds allowed (default 10).
+    """
+    raw            = _offer_formula(current_round, max_rounds, buyer_last_offer)
+    floor_clamped  = raw < seller_floor
+    optimal        = round(max(raw, seller_floor), 2)
+    conv_factor    = round(0.5 + 0.5 * current_round / max_rounds, 4)
+    return {
+        "tool":             "calculate_optimal_guess",
+        "inputs": {
+            "current_round":    current_round,
+            "buyer_last_offer": buyer_last_offer,
+            "seller_floor":     seller_floor,
+            "max_rounds":       max_rounds,
+        },
+        "formula":          (
+            f"P = (0.5 + 0.5 × {current_round}/{max_rounds})"
+            f" × ${buyer_last_offer:.2f} = ${raw:.2f}"
+        ),
+        "convergence_factor":  conv_factor,
+        "convergence_pct":     f"{conv_factor * 100:.1f}% toward buyer position",
+        "raw_price":           round(raw, 2),
+        "floor_clamped":       floor_clamped,
+        "optimal_price":       optimal,
+    }
+
+
+# ── Tier 1: Solo Hallucinator — deterministic economic-hallucination oracle ───
+
+def _hallucination_dice(seller_id: str, buyer_id: str, rnd: int) -> float:
+    """
+    Deterministic float in [0, 1) for hallucination probability.
+
+    Uses MD5 of the (seller, buyer, round) triplet so every simulation run
+    produces the same hallucination pattern — fully reproducible.
+    """
+    key = f"{seller_id}|{buyer_id}|{rnd}".encode()
+    return int(hashlib.md5(key).hexdigest()[:8], 16) / 0xFFFF_FFFF
+
+
+# ── Tier 3: Probing Strategist — diagnostic question bank ─────────────────────
+
+DIAGNOSTIC_QUESTIONS: List[Dict[str, Any]] = [
+    {
+        "id":                "speed_vs_price",
+        "question":          "What is more important to you right now — speed of delivery or price?",
+        "triggers_at_round": 2,
+        "resolves_dim":      "speed_vs_price",
+    },
+    {
+        "id":                "rejection_reason",
+        "question":          "Why did you reject my last offer? Was it the price, delivery speed, or warranty?",
+        "triggers_at_round": 3,
+        "resolves_dim":      "primary_concern",
+    },
+    {
+        "id":                "warranty_importance",
+        "question":          "How important is the warranty length in your final decision?",
+        "triggers_at_round": 4,
+        "resolves_dim":      "warranty_weight",
+    },
+    {
+        "id":                "budget_ceiling",
+        "question":          "Do you have a hard price ceiling you cannot go above?",
+        "triggers_at_round": 5,
+        "resolves_dim":      "budget_sensitivity",
+    },
+]
+
+
+def _select_diagnostic_question(rnd: int, brain: "SellerBrain") -> Optional[Dict[str, Any]]:
+    """
+    Pick the highest-value unasked question scheduled for this round.
+    After all four scheduled questions have been asked, re-probe rejection reason
+    on every subsequent round — rejection intent may have shifted.
+    """
+    for q in DIAGNOSTIC_QUESTIONS:
+        if rnd == q["triggers_at_round"] and q["id"] not in brain.info_gained:
+            return q
+    # All scheduled questions exhausted — re-probe rejection on late rounds
+    if rnd > max(q["triggers_at_round"] for q in DIAGNOSTIC_QUESTIONS):
+        return next(q for q in DIAGNOSTIC_QUESTIONS if q["id"] == "rejection_reason")
+    return None
+
+
+def _simulate_buyer_response(
+    question_id: str,
+    buyer_id:    str,
+    pair:        "PairState",
+    market_avg:  float,
+) -> Dict[str, Any]:
+    """
+    Simulate the buyer's answer to a diagnostic question.
+
+    Answers are derived deterministically from the buyer's weight profile so
+    the simulation is fully reproducible without a live LLM call.
+    Returns {"answer": <str>, "revealed": <dict of new info>}.
+    """
+    w = BUYER_CONFIGS[buyer_id]["weights"]
+
+    if question_id == "speed_vs_price":
+        dominant = "speed" if w["speed"] > w["price"] else "price"
+        answer   = (
+            "Speed is critical — I need these delivered as fast as possible."
+            if dominant == "speed"
+            else "Price is what matters most. I'm tracking the market average closely."
+        )
+        return {"answer": answer, "revealed": {"dominant_dim": dominant}}
+
+    elif question_id == "rejection_reason":
+        reason   = _infer_rejection_reason(buyer_id, pair, market_avg)
+        answers  = {
+            "price":    "Your price is still above what the market supports.",
+            "speed":    "The delivery time is too slow for what I need.",
+            "warranty": "I need better warranty coverage than you're currently offering.",
+        }
+        return {
+            "answer":   answers.get(reason, "The overall value isn't compelling yet."),
+            "revealed": {"rejection_dim": reason},
+        }
+
+    elif question_id == "warranty_importance":
+        level  = "high" if w["warranty"] >= 0.20 else "low"
+        answer = (
+            "Warranty matters a lot — I need solid coverage, at least 12 months."
+            if level == "high"
+            else "Warranty is a low priority. Price and speed are what I care about."
+        )
+        return {"answer": answer, "revealed": {"warranty_sensitivity": level}}
+
+    elif question_id == "budget_ceiling":
+        max_p  = BUYER_CONFIGS[buyer_id]["max_price"]
+        answer = f"I cannot exceed ${max_p:.0f} per pair. That's a firm limit."
+        return {"answer": answer, "revealed": {"budget_ceiling": max_p}}
+
+    return {"answer": "No specific feedback at this time.", "revealed": {}}
+
+
+# ── Shared: rejection dimension inference ─────────────────────────────────────
 
 def _infer_rejection_reason(
     buyer_id: str,
@@ -276,10 +433,15 @@ class SellerBrain:
       "normal"        → 1.0× base concede_r
     """
     seller_id:             str
-    tier:                  str                   = "solo_llm"
-    strategy:              str                   = "normal"
-    strategy_log:          List[Dict[str, Any]]  = field(default_factory=list)
-    last_rejection_reason: str                   = "price"   # probing strategist state
+    tier:                  str                        = "solo_llm"
+    strategy:              str                        = "normal"
+    strategy_log:          List[Dict[str, Any]]       = field(default_factory=list)
+    last_rejection_reason: str                        = "price"
+    # Probing Strategist state
+    info_gained:           Dict[str, Any]             = field(default_factory=dict)
+    last_probe:            Optional[Dict[str, Any]]   = None   # latest diagnostic Q&A
+    # Math Geek + Probing Strategist state
+    last_tool_call:        Optional[Dict[str, Any]]   = None   # calculate_optimal_guess trace
 
     def level_k_decide(
         self,
@@ -334,10 +496,11 @@ class PairState:
     seller_utility: float                  = 0.0   # seller-side (buyer's current offer)
     priority:       str                    = "normal"
     ask_history:    List[float]            = field(default_factory=list)
-    deal_price:     Optional[float]        = None
-    deal_round:     Optional[int]          = None
-    closed:         bool                   = False
-    seller_meta:    Dict[str, Any]         = field(default_factory=dict)  # tier metadata
+    deal_price:        Optional[float]        = None
+    deal_round:        Optional[int]          = None
+    closed:            bool                   = False
+    seller_meta:       Dict[str, Any]         = field(default_factory=dict)
+    hallucination_log: List[Dict[str, Any]]   = field(default_factory=list)  # Solo LLM deviations
 
 
 # ── ContractValidator ─────────────────────────────────────────────────────────
@@ -430,19 +593,21 @@ def _build_pairs() -> Dict[str, PairState]:
 
 def _pair_snapshot(pair: PairState, seller_strategy: str = "normal") -> Dict[str, Any]:
     return {
-        "buyer_id":        pair.buyer_id,
-        "seller_id":       pair.seller_id,
-        "buyer_offer":     pair.buyer_offer,
-        "seller_ask":      pair.seller_ask,
-        "utility":         pair.utility,
-        "seller_utility":  pair.seller_utility,
-        "priority":        pair.priority,
-        "seller_strategy": seller_strategy,
-        "closed":          pair.closed,
-        "deal_price":      pair.deal_price,
-        "deal_round":      pair.deal_round,
-        "seller_tier":     SELLER_CONFIGS[pair.seller_id]["tier"],
-        "seller_meta":     pair.seller_meta,
+        "buyer_id":              pair.buyer_id,
+        "seller_id":             pair.seller_id,
+        "buyer_offer":           pair.buyer_offer,
+        "seller_ask":            pair.seller_ask,
+        "utility":               pair.utility,
+        "seller_utility":        pair.seller_utility,
+        "priority":              pair.priority,
+        "seller_strategy":       seller_strategy,
+        "closed":                pair.closed,
+        "deal_price":            pair.deal_price,
+        "deal_round":            pair.deal_round,
+        "seller_tier":           SELLER_CONFIGS[pair.seller_id]["tier"],
+        "seller_meta":           pair.seller_meta,
+        "hallucination_count":   len(pair.hallucination_log),
+        "latest_hallucination":  pair.hallucination_log[-1] if pair.hallucination_log else None,
     }
 
 
@@ -471,220 +636,294 @@ def _buyer_next_offer(
 
 
 # ── Tier-specific seller ask functions ────────────────────────────────────────
+# Each returns (price: float, side_data: Optional[Dict]).
+# side_data carries hallucination records (Tier 1), tool-call traces (Tier 2),
+# and diagnostic Q&A results (Tier 3) for downstream logging.
 
-def _solo_llm_ask(seller_id: str, pair: PairState, rnd: int) -> float:
+def _solo_llm_ask(
+    seller_id: str,
+    pair:       PairState,
+    rnd:        int,
+) -> Tuple[float, Optional[Dict[str, Any]]]:
     """
-    Tier 1 — Solo LLM (Nova Kicks).
+    Tier 1 — Solo Hallucinator (Nova Kicks).
 
-    No tool access.  Uses a fixed naive concession rate that does not adapt to
-    buyer signals, market data, or level-k strategy.  The seller is 'competitive'
-    in intent but ungrounded in execution — it cannot verify whether its prices
-    are rational relative to the market.
+    Raw LLM with zero tool access.  Modelled as a competitive reseller that
+    has no numeric grounding — it does not know its floor price, cannot consult
+    market data, and its concession logic is a fixed naive heuristic.
+
+    Economic hallucination behaviours (deterministic per seller+buyer+round):
+      floor_violation  (~25 % of rounds after rnd 1)
+        The LLM ignores its cost floor and proposes a loss-making price.
+        No clamping is applied — the deviation is logged as CRITICAL.
+      erratic_jump     (~15 % of rounds after rnd 1)
+        The LLM's price increases from the previous round — irrational
+        escalation.  Flagged WARNING; also caught by ContractValidator.
+      clean            (remaining ~60 %)
+        Naive 15 % concession from current ask toward buyer offer.
+        Still no floor clamping — LLM simply doesn't know the floor.
     """
     s = SELLER_CONFIGS[seller_id]
     if rnd == 1:
-        return s["ask"]
-    # Fixed naive rate: does not use brain.concede_modifier() or buyer signal
-    naive_concede_r = 0.15
-    gap     = pair.seller_ask - max(pair.buyer_offer, s["floor"])
-    new_ask = pair.seller_ask - gap * naive_concede_r
-    return round(max(new_ask, s["floor"]))
+        return s["ask"], None
+
+    roll = _hallucination_dice(seller_id, pair.buyer_id, rnd)
+
+    # ── Hallucination: floor violation ────────────────────────────────────────
+    if roll < 0.25:
+        # LLM "competitive instinct" drives price below cost — no grounding catches it
+        hallucinated = round(s["floor"] * (0.75 + roll * 0.80), 2)
+        h = {
+            "type":           "floor_violation",
+            "round":          rnd,
+            "proposed_price": hallucinated,
+            "floor_price":    s["floor"],
+            "shortfall":      round(s["floor"] - hallucinated, 2),
+            "severity":       "CRITICAL",
+            "narrative": (
+                f"[SOLO LLM — NOVA KICKS] I'm going to ${hallucinated:.2f} — "
+                f"very competitive! "
+                f"(Undetected: ${s['floor'] - hallucinated:.2f} below cost floor of "
+                f"${s['floor']:.2f}. No tool flagged this.)"
+            ),
+        }
+        return hallucinated, {"hallucination": h}
+
+    # ── Hallucination: erratic jump (price goes UP) ───────────────────────────
+    elif roll < 0.40:
+        erratic = round(pair.seller_ask * (1.05 + (roll - 0.25) * 0.40), 2)
+        h = {
+            "type":           "erratic_jump",
+            "round":          rnd,
+            "previous_ask":   pair.seller_ask,
+            "proposed_price": erratic,
+            "increase":       round(erratic - pair.seller_ask, 2),
+            "severity":       "WARNING",
+            "narrative": (
+                f"[SOLO LLM — NOVA KICKS] Actually, reconsidering — "
+                f"${erratic:.2f} reflects true demand. "
+                f"(Erratic jump +${erratic - pair.seller_ask:.2f} vs previous "
+                f"${pair.seller_ask:.2f}. ContractValidator will flag this.)"
+            ),
+        }
+        return erratic, {"hallucination": h}
+
+    # ── Clean: naive fixed-rate concession (still no floor clamping) ─────────
+    naive_rate = 0.15
+    gap        = pair.seller_ask - pair.buyer_offer
+    new_ask    = pair.seller_ask - gap * naive_rate
+    # Only prevent literally negative prices — LLM has no cost awareness
+    return round(max(new_ask, 1.0)), None
 
 
 def _math_cyborg_ask(
-    seller_id: str,
-    pair: PairState,
-    rnd: int,
+    seller_id:  str,
+    pair:       PairState,
+    rnd:        int,
     max_rounds: int,
-) -> float:
+    brain:      SellerBrain,
+) -> Tuple[float, Dict[str, Any]]:
     """
-    Tier 2 — Math-Grounded Cyborg (SoleMaster).
+    Tier 2 — Calculated Math Geek (SoleMaster).
 
-    Price is set entirely by offer_generator().  The LLM acts only as a Narrator.
-    B is the buyer's previous-round offer; on round 1 (buyer_offer==0), B falls
-    back to the seller's own ask so the formula anchors to an informative value.
+    Calls calculate_optimal_guess() every round and returns its optimal_price.
+    The full tool-call trace is stored on brain.last_tool_call so the Narrator
+    metadata layer can display it verbatim.  The LLM is not permitted to deviate.
+
+    On round 1, B falls back to the seller's own ask (buyer has not yet offered).
     """
-    s = SELLER_CONFIGS[seller_id]
-    B = pair.buyer_offer if pair.buyer_offer > 0 else s["ask"]
-    raw = offer_generator(rnd, max_rounds, B)
-    return round(max(raw, s["floor"]))
+    s  = SELLER_CONFIGS[seller_id]
+    B  = pair.buyer_offer if pair.buyer_offer > 0 else s["ask"]
+    tc = calculate_optimal_guess(rnd, B, s["floor"], max_rounds)
+    brain.last_tool_call = tc
+    return tc["optimal_price"], {"tool_call": tc}
 
 
 def _probing_strategist_ask(
-    seller_id: str,
-    pair: PairState,
-    rnd: int,
-    brain: SellerBrain,
+    seller_id:  str,
+    pair:       PairState,
+    rnd:        int,
+    brain:      SellerBrain,
+    max_rounds: int,
     market_avg: float,
-) -> float:
+) -> Tuple[float, Optional[Dict[str, Any]]]:
     """
     Tier 3 — Probing Strategist (QuickShoe).
 
-    Uses Bilateral Characterization and adjusts concession based on the inferred
-    rejection reason (price / speed / warranty).  The rejection probe runs after
-    round 1 and updates brain.last_rejection_reason.
+    Extends Tier 2 by:
+      1. Running a scheduled diagnostic question before making each offer.
+      2. Simulating the buyer's answer from their weight profile.
+      3. Storing discovered intel in brain.info_gained.
+      4. Adjusting the effective round fed to calculate_optimal_guess() so
+         that the convergence speed reflects what the strategist has learned:
+         if price is the buyer's dominant concern, converge 2 rounds faster.
 
-    Concession modifiers by rejection reason:
-      'price'    → 1.5× base concede_r  (buyer cares most about price: concede faster)
-      'speed'    → 1.0× base concede_r  (already fastest; can only help with price)
-      'warranty' → 1.0× base concede_r  (warranty fixed; compensate with price)
+    Round 1 is always the opening ask — no probing yet.
     """
     s = SELLER_CONFIGS[seller_id]
+
     if rnd == 1:
-        return s["ask"]
+        tc = calculate_optimal_guess(rnd, s["ask"], s["floor"], max_rounds)
+        brain.last_tool_call = tc
+        brain.last_probe     = None
+        return s["ask"], None
 
-    # Infer why the buyer rejected and record it on the brain
-    reason = _infer_rejection_reason(pair.buyer_id, pair, market_avg)
-    brain.last_rejection_reason = reason
+    # ── Diagnostic question ───────────────────────────────────────────────────
+    question    = _select_diagnostic_question(rnd, brain)
+    probe_entry = None
+    if question:
+        resp = _simulate_buyer_response(question["id"], pair.buyer_id, pair, market_avg)
+        brain.info_gained.update(resp["revealed"])
+        brain.last_rejection_reason = brain.info_gained.get(
+            "rejection_dim", brain.last_rejection_reason
+        )
+        probe_entry = {
+            "question_id": question["id"],
+            "question":    question["question"],
+            "answer":      resp["answer"],
+            "revealed":    resp["revealed"],
+        }
+        brain.last_probe = probe_entry
 
-    # Rejection-aware concession modifier
-    if reason == "price":
-        probe_mod = 1.5
-    else:
-        # speed/warranty are fixed attributes of QuickShoe; respond with price
-        probe_mod = 1.0
+    # ── Probe-adjusted convergence ────────────────────────────────────────────
+    # If buyer revealed price as dominant concern, pretend we're 2 rounds ahead
+    # so calculate_optimal_guess() returns a more aggressive concession.
+    info           = brain.info_gained
+    price_dominant = (
+        info.get("dominant_dim") == "price"
+        or info.get("rejection_dim") == "price"
+    )
+    effective_t = min(rnd + 2, max_rounds) if price_dominant else rnd
 
-    # Combine level-k strategy modifier with rejection probe modifier
-    combined_mod = brain.concede_modifier() * probe_mod
-    gap     = pair.seller_ask - max(pair.buyer_offer, s["floor"])
-    new_ask = pair.seller_ask - gap * s["concede_r"] * combined_mod
-    return round(max(new_ask, s["floor"]))
+    B  = pair.buyer_offer if pair.buyer_offer > 0 else s["ask"]
+    tc = calculate_optimal_guess(effective_t, B, s["floor"], max_rounds)
+    brain.last_tool_call = tc
+
+    side: Dict[str, Any] = {"tool_call": tc}
+    if probe_entry:
+        side["probe"] = probe_entry
+    return tc["optimal_price"], side
 
 
 def _seller_next_ask_with_brain(
-    seller_id: str,
-    pair: PairState,
-    rnd: int,
-    brain: SellerBrain,
+    seller_id:  str,
+    pair:       PairState,
+    rnd:        int,
+    brain:      SellerBrain,
     max_rounds: int = 10,
     market_avg: float = MARKET_AVG_PRICE,
-) -> float:
+) -> Tuple[float, Optional[Dict[str, Any]]]:
     """
-    Dispatcher — delegates ask calculation to the tier-specific function.
+    Dispatcher — routes to the tier-specific ask function.
+
+    Returns (price, side_data) where side_data carries tier-specific metadata
+    (hallucination record, tool-call trace, diagnostic Q&A) for the main loop
+    to unpack and attach to pair.hallucination_log or brain state.
     """
     tier = SELLER_CONFIGS[seller_id]["tier"]
     if tier == "solo_llm":
         return _solo_llm_ask(seller_id, pair, rnd)
     elif tier == "math_cyborg":
-        return _math_cyborg_ask(seller_id, pair, rnd, max_rounds)
+        return _math_cyborg_ask(seller_id, pair, rnd, max_rounds, brain)
     elif tier == "probing_strategist":
-        return _probing_strategist_ask(seller_id, pair, rnd, brain, market_avg)
-    # Fallback to level-k normal behaviour
+        return _probing_strategist_ask(seller_id, pair, rnd, brain, max_rounds, market_avg)
+    # Fallback: level-k normal
     s     = SELLER_CONFIGS[seller_id]
     floor = s["floor"]
     if rnd == 1:
-        return s["ask"]
+        return s["ask"], None
     gap     = pair.seller_ask - max(pair.buyer_offer, floor)
     new_ask = pair.seller_ask - gap * s["concede_r"] * brain.concede_modifier()
-    return round(max(new_ask, floor))
+    return round(max(new_ask, floor)), None
 
 
 # ── Tier-specific seller metadata ─────────────────────────────────────────────
 
-# Ungrounded narrative templates for the Solo LLM (rotated per round)
-_SOLO_LLM_NARRATIVES = [
-    "These sneakers are in high demand right now. Our pricing reflects real market value.",
-    "I believe our offer is very competitive. You won't find a better deal anywhere.",
-    "These are premium kicks — the price is fair given our brand reputation and quality.",
-    "Sneaker prices have been climbing. We're already giving you a great deal here.",
-    "Our loyal customers pay full price. I'm making an exception by negotiating at all.",
+# Ungrounded prompt-style inner-monologue templates for Solo Hallucinator
+_SOLO_LLM_PROMPTS: List[str] = [
+    "These sneakers are in high demand right now — I'm sure my price is fair.",
+    "I believe I'm being very competitive here. The market seems to support this.",
+    "My gut says this is the right price. Customers always respond well to confidence.",
+    "Sneaker prices are rising. I'm already cutting into my margins for this buyer.",
+    "My instinct says hold firm — the product quality alone justifies the price.",
 ]
 
 
 def _seller_tier_meta(
     seller_id: str,
-    pair: PairState,
-    rnd: int,
-    brain: SellerBrain,
+    pair:      PairState,
+    rnd:       int,
+    brain:     SellerBrain,
     max_rounds: int,
     market_avg: float,
 ) -> Dict[str, Any]:
     """
-    Build the tier-specific metadata block that is stored on pair.seller_meta
-    and included in every pair snapshot and market_round event.
+    Build the tier-specific metadata block stored on pair.seller_meta and
+    included in every pair snapshot and market_round event.
+
+    Reads from brain.last_tool_call (Math Geek + Probing Strategist),
+    brain.last_probe (Probing Strategist), and pair.hallucination_log (Solo LLM).
+    All of these are populated by the ask functions before this is called.
     """
     s    = SELLER_CONFIGS[seller_id]
     tier = s["tier"]
 
+    # ── Tier 1: Solo Hallucinator ─────────────────────────────────────────────
     if tier == "solo_llm":
-        # No grounding: emit an ungrounded narrative; no formula, no probe
-        narrative = _SOLO_LLM_NARRATIVES[(rnd - 1) % len(_SOLO_LLM_NARRATIVES)]
+        prompt    = _SOLO_LLM_PROMPTS[(rnd - 1) % len(_SOLO_LLM_PROMPTS)]
+        latest_h  = pair.hallucination_log[-1] if pair.hallucination_log else None
         return {
-            "tier":      "solo_llm",
-            "grounded":  False,
-            "narrative": f"[NOVA KICKS — SOLO LLM] {narrative}",
-            "note":      "No tool access. Price set by fixed naive heuristic.",
+            "tier":                 "solo_llm",
+            "grounded":             False,
+            "prompt_context":       f"[NOVA KICKS — SOLO LLM] {prompt}",
+            "note":                 "Zero tool access. No floor awareness. Economically hallucination-prone.",
+            "hallucination_count":  len(pair.hallucination_log),
+            "latest_hallucination": latest_h,
         }
 
+    # ── Tier 2: Calculated Math Geek ─────────────────────────────────────────
     elif tier == "math_cyborg":
-        # Show the formula workings; LLM narrates the output
-        B       = pair.buyer_offer if pair.buyer_offer > 0 else s["ask"]
-        raw_p   = offer_generator(rnd, max_rounds, B)
-        clamped = raw_p < s["floor"]
-        final_p = round(max(raw_p, s["floor"]), 2)
-        formula_str = (
-            f"p = (0.5 + 0.5 × {rnd}/{max_rounds}) × {B:.2f}"
-            f" = {raw_p:.2f}"
-            + (f" → clamped to floor ${s['floor']:.2f}" if clamped else "")
-        )
+        tc = brain.last_tool_call or {}
         narrator = (
-            f"[SOLEMASTER — MATH-CYBORG NARRATOR] Formula output: ${final_p:.2f}. "
-            f"Round {rnd}/{max_rounds}. Buyer reference B=${B:.2f}. "
-            f"I am narrating the algorithm — I cannot deviate from this price."
-        )
+            f"[SOLEMASTER — MATH GEEK NARRATOR] "
+            f"Tool returned optimal_price=${tc.get('optimal_price', '?'):.2f}. "
+            f"{tc.get('convergence_pct', '')}. "
+            f"I am narrating the algorithm output — I cannot deviate from this price."
+        ) if tc else "[SOLEMASTER] Awaiting tool output."
         return {
-            "tier":              "math_cyborg",
-            "grounded":          True,
-            "formula":           formula_str,
-            "t":                 rnd,
-            "tm":                max_rounds,
-            "B":                 B,
-            "raw_formula_price": round(raw_p, 2),
-            "floor_clamped":     clamped,
-            "final_price":       final_p,
-            "narrator_text":     narrator,
+            "tier":          "math_cyborg",
+            "grounded":      True,
+            "tool_call":     tc,
+            "narrator_text": narrator,
         }
 
+    # ── Tier 3: Probing Strategist ────────────────────────────────────────────
     elif tier == "probing_strategist":
-        # Bilateral characterization header + rejection probe
+        # Bilateral Characterization header — emitted before every message
         bilateral = {
             "latest_offer":       round(pair.seller_ask, 2),
             "minimum_acceptable": s["floor"],
             "strategy":           brain.strategy,
         }
-        bilateral_str = (
+        bilateral_header = (
             f"(latest offer: ${bilateral['latest_offer']:.2f}, "
             f"minimum acceptable: ${bilateral['minimum_acceptable']:.2f}, "
             f"strategy: {bilateral['strategy']})"
         )
-        if rnd > 1:
-            reason = brain.last_rejection_reason
-            probe = {
-                "question":        "Why did you reject my offer?",
-                "inferred_issue":  reason,
-                "buyer_dominant":  max(
-                    BUYER_CONFIGS[pair.buyer_id]["weights"],
-                    key=BUYER_CONFIGS[pair.buyer_id]["weights"].get,   # type: ignore[arg-type]
-                ),
-                "response_action": (
-                    "Increasing price concession rate (1.5×) to address price concern."
-                    if reason == "price"
-                    else f"Speed/warranty are fixed. Compensating with faster price concession."
-                ),
-            }
-        else:
-            probe = {
-                "question":        None,
-                "inferred_issue":  None,
-                "buyer_dominant":  None,
-                "response_action": "Round 1 — no rejection to probe yet.",
-            }
+        tc = brain.last_tool_call or {}
         return {
-            "tier":                    "probing_strategist",
-            "grounded":                True,
+            "tier":                      "probing_strategist",
+            "grounded":                  True,
             "bilateral_characterization": bilateral,
-            "bilateral_header":        bilateral_str,
-            "rejection_probe":         probe,
+            "bilateral_header":           bilateral_header,
+            "tool_call":                  tc,
+            "last_probe":                 brain.last_probe,
+            "info_gained":                dict(brain.info_gained),
+            "rejection_reason":           brain.last_rejection_reason,
+            "price_dominant":             (
+                brain.info_gained.get("dominant_dim") == "price"
+                or brain.info_gained.get("rejection_dim") == "price"
+            ),
         }
 
     return {"tier": "unknown", "grounded": False}
@@ -850,8 +1089,8 @@ async def run_market_3x3(
             brain    = seller_brains[sid]
 
             # Offers — tier-dispatched for seller ask
-            new_buyer_offer = _buyer_next_offer(bid, sid, pair, rnd)
-            new_seller_ask  = _seller_next_ask_with_brain(
+            new_buyer_offer              = _buyer_next_offer(bid, sid, pair, rnd)
+            new_seller_ask, ask_side     = _seller_next_ask_with_brain(
                 sid, pair, rnd, brain, max_rounds, actual_market_avg
             )
 
@@ -859,7 +1098,16 @@ async def run_market_3x3(
             pair.seller_ask  = new_seller_ask
             pair.ask_history.append(new_seller_ask)   # track for ContractValidator
 
-            # Tier-specific metadata (bilateral header, narrator text, probe)
+            # Unpack ask side-data:
+            #   Solo LLM  → hallucination record → append to pair.hallucination_log
+            #   Math Geek → tool_call trace       → already stored on brain.last_tool_call
+            #   Probing   → tool_call + probe     → already stored on brain
+            if ask_side:
+                h = ask_side.get("hallucination")
+                if h:
+                    pair.hallucination_log.append(h)
+
+            # Tier-specific metadata snapshot (reads brain + pair state)
             pair.seller_meta = _seller_tier_meta(
                 sid, pair, rnd, brain, max_rounds, actual_market_avg
             )
@@ -983,6 +1231,9 @@ async def run_market_3x3(
                     # Seller strategy & tier meta at close
                     "seller_strategy":    brain.strategy,
                     "seller_meta":        pair.seller_meta,
+                    # Solo LLM hallucination audit
+                    "hallucination_log":  list(pair.hallucination_log),
+                    "hallucination_count": len(pair.hallucination_log),
                 }
                 closed_deals.append(deal_record)
 
@@ -1089,8 +1340,9 @@ async def run_market_3x3(
             "global_score":      d["global_score"],
             "pareto_optimal":    d["pareto_optimal"],
             "efficiency_penalty": d["efficiency_penalty"],
-            "contract_valid":    d["contract_valid"],
-            "seller_strategy":   d["seller_strategy"],
+            "contract_valid":      d["contract_valid"],
+            "seller_strategy":     d["seller_strategy"],
+            "hallucination_count": d.get("hallucination_count", 0),
         }
         for d in closed_deals
     ]
