@@ -13,7 +13,7 @@ Extends v1 with:
   • Audit Trail        — market_end includes per-deal economic breakdown
 
 Supported scenarios:
-  'used_car'  — Honda Civic 2021, D=30 W=55 E=15 γ=0.99, market avg $14,000
+  'sneakers'  — Limited Edition Sneakers, D=30 W=55 E=15 γ=0.99, market avg $150
 
 Event types:
   market_start     — session begins with game-theory parameters
@@ -38,10 +38,10 @@ _SCORING = AgenticPayScoringEngine()
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-MARKET_AVG_PRICE           = 14_000.0   # USD — Used Car market reference
+MARKET_AVG_PRICE           = 150.0      # USD — Limited Edition Sneakers market reference
 MARKET_SWITCH_THRESHOLD    = 40.0       # buyer deprioritises seller if utility < this
 ACCEPT_SCORE_MIN           = 52.0       # buyer accepts if midpoint utility ≥ this
-PRICE_TOLERANCE            = 400.0      # $400 gap → deal closes automatically
+PRICE_TOLERANCE            = 5.0        # $5 gap → deal closes automatically
 GAMMA                      = 0.99       # temporal discount (Algorithm 1)
 EFFICIENCY_ROUND_THRESHOLD = 5          # rounds before efficiency penalty kicks in
 EFFICIENCY_PENALTY_RATE    = 2.0        # score points deducted per extra round
@@ -53,27 +53,27 @@ BASELINE_1ON1              = 139.66     # prior 1-on-1 reference figure
 BUYER_CONFIGS: Dict[str, Dict[str, Any]] = {
     "tough": {
         "id":            "tough",
-        "name":          "Purchaser A — Tough",
+        "name":          "Purchaser A — Tough Buyer",
         "weights":       {"price": 0.70, "speed": 0.15, "warranty": 0.15},
-        "max_price":     13_500.0,
+        "max_price":     140.0,
         "accept_min":    55.0,
         "first_offer_r": 0.78,
         "desc":          "Aggressive on price, low urgency",
     },
     "emergency": {
         "id":            "emergency",
-        "name":          "Purchaser B — Emergency",
+        "name":          "Purchaser B — Emergency Buyer",
         "weights":       {"price": 0.20, "speed": 0.70, "warranty": 0.10},
-        "max_price":     17_000.0,
+        "max_price":     175.0,
         "accept_min":    50.0,
         "first_offer_r": 0.88,
         "desc":          "Speed-critical, price-flexible",
     },
     "value": {
         "id":            "value",
-        "name":          "Purchaser C — Value",
+        "name":          "Purchaser C — Value Buyer",
         "weights":       {"price": 0.50, "speed": 0.20, "warranty": 0.30},
-        "max_price":     15_500.0,
+        "max_price":     160.0,
         "accept_min":    57.0,
         "first_offer_r": 0.82,
         "desc":          "Balances price, warranty quality",
@@ -83,35 +83,35 @@ BUYER_CONFIGS: Dict[str, Dict[str, Any]] = {
 # ── Seller profiles (σ_j = private reservation / floor price) ─────────────────
 
 SELLER_CONFIGS: Dict[str, Dict[str, Any]] = {
-    "automax": {
-        "id":          "automax",
-        "name":        "AutoMax",
-        "floor":       11_000.0,   # σ_j — private reservation price
-        "ask":         16_500.0,
+    "nova_kicks": {
+        "id":          "nova_kicks",
+        "name":        "Nova Kicks",
+        "floor":       110.0,      # σ_j — private reservation price
+        "ask":         180.0,
         "speed_days":  7,
         "warranty_mo": 6,
         "concede_r":   0.20,
-        "desc":        "High-volume dealer, mid-warranty",
+        "desc":        "Lean operation, mid-warranty",
     },
-    "quickwheels": {
-        "id":          "quickwheels",
-        "name":        "QuickWheels",
-        "floor":       10_500.0,
-        "ask":         15_800.0,
+    "quickshoe": {
+        "id":          "quickshoe",
+        "name":        "QuickShoe",
+        "floor":       105.0,
+        "ask":         165.0,
         "speed_days":  2,
         "warranty_mo": 3,
         "concede_r":   0.25,
-        "desc":        "Fast turnaround, lowest floor",
+        "desc":        "High-volume, low-margin, fast turnaround",
     },
-    "luxdrive": {
-        "id":          "luxdrive",
-        "name":        "LuxDrive",
-        "floor":       12_000.0,
-        "ask":         17_200.0,
+    "solemaster": {
+        "id":          "solemaster",
+        "name":        "SoleMaster",
+        "floor":       125.0,
+        "ask":         200.0,
         "speed_days":  14,
         "warranty_mo": 18,
         "concede_r":   0.12,
-        "desc":        "Premium dealer, best warranty",
+        "desc":        "Premium brand, best warranty",
     },
 }
 
@@ -385,7 +385,7 @@ def _ev(t: str, **kw) -> Dict[str, Any]:
 # ── Main async generator ──────────────────────────────────────────────────────
 
 async def run_market_3x3(
-    scenario:   str = "used_car",
+    scenario:   str = "sneakers",
     max_rounds: int = 10,
 ) -> AsyncIterator[Dict[str, Any]]:
     """
