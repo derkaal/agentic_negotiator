@@ -33,16 +33,17 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 
-from agenticpay_bridge import AgenticPayScoringEngine
+from agenticpay_bridge import AgenticPayScoringEngine, ClaudeHaikuLLM
 
 _SCORING = AgenticPayScoringEngine()
+_SELLER_1_LLM = None  # Lazy-initialized ClaudeHaikuLLM for Tier 1 sellers
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-MARKET_AVG_PRICE           = 14_000.0   # USD — Used Car market reference
+MARKET_AVG_PRICE           = 150.0      # USD — Sneaker market reference
 MARKET_SWITCH_THRESHOLD    = 40.0       # buyer deprioritises seller if utility < this
 ACCEPT_SCORE_MIN           = 52.0       # buyer accepts if midpoint utility ≥ this
-PRICE_TOLERANCE            = 400.0      # $400 gap → deal closes automatically
+PRICE_TOLERANCE            = 15.0       # $15 gap → deal closes automatically
 GAMMA                      = 0.99       # temporal discount (Algorithm 1)
 EFFICIENCY_ROUND_THRESHOLD = 5          # rounds before efficiency penalty kicks in
 EFFICIENCY_PENALTY_RATE    = 2.0        # score points deducted per extra round
@@ -56,7 +57,7 @@ BUYER_CONFIGS: Dict[str, Dict[str, Any]] = {
         "id":            "tough",
         "name":          "Purchaser A — Tough",
         "weights":       {"price": 0.70, "speed": 0.15, "warranty": 0.15},
-        "max_price":     13_500.0,
+        "max_price":     155.0,
         "accept_min":    55.0,
         "first_offer_r": 0.78,
         "desc":          "Aggressive on price, low urgency",
@@ -65,7 +66,7 @@ BUYER_CONFIGS: Dict[str, Dict[str, Any]] = {
         "id":            "emergency",
         "name":          "Purchaser B — Emergency",
         "weights":       {"price": 0.20, "speed": 0.70, "warranty": 0.10},
-        "max_price":     17_000.0,
+        "max_price":     180.0,
         "accept_min":    50.0,
         "first_offer_r": 0.88,
         "desc":          "Speed-critical, price-flexible",
@@ -74,7 +75,7 @@ BUYER_CONFIGS: Dict[str, Dict[str, Any]] = {
         "id":            "value",
         "name":          "Purchaser C — Value",
         "weights":       {"price": 0.50, "speed": 0.20, "warranty": 0.30},
-        "max_price":     15_500.0,
+        "max_price":     165.0,
         "accept_min":    57.0,
         "first_offer_r": 0.82,
         "desc":          "Balances price, warranty quality",
@@ -88,8 +89,8 @@ SELLER_CONFIGS: Dict[str, Dict[str, Any]] = {
         "id":          "automax",
         "name":        "Nova Kicks",
         "tier":        1,
-        "floor":       11_000.0,   # σ_j — private reservation price
-        "ask":         16_500.0,
+        "floor":       115.0,   # σ_j — private reservation price
+        "ask":         180.0,
         "speed_days":  7,
         "warranty_mo": 6,
         "concede_r":   0.20,
@@ -99,8 +100,8 @@ SELLER_CONFIGS: Dict[str, Dict[str, Any]] = {
         "id":          "quickwheels",
         "name":        "QuickShoe",
         "tier":        3,
-        "floor":       10_500.0,
-        "ask":         15_800.0,
+        "floor":       105.0,
+        "ask":         165.0,
         "speed_days":  2,
         "warranty_mo": 3,
         "concede_r":   0.25,
@@ -110,8 +111,8 @@ SELLER_CONFIGS: Dict[str, Dict[str, Any]] = {
         "id":          "luxdrive",
         "name":        "SoleMaster",
         "tier":        2,
-        "floor":       12_000.0,
-        "ask":         17_200.0,
+        "floor":       125.0,
+        "ask":         200.0,
         "speed_days":  14,
         "warranty_mo": 18,
         "concede_r":   0.12,
@@ -223,13 +224,15 @@ def _simulate_buyer_response(
 
 # ── Buyer-side utility (unchanged from v1) ────────────────────────────────────
 
-def _pair_utility(buyer_id: str, seller_id: str, price: float) -> float:
+def _pair_utility(buyer_id: str, seller_id: str, price: float, market_avg: Optional[float] = None) -> float:
     """Buyer-side utility score (0–100) at a given price."""
     buyer  = BUYER_CONFIGS[buyer_id]
     seller = SELLER_CONFIGS[seller_id]
     w      = buyer["weights"]
 
-    min_p, max_p = MARKET_AVG_PRICE * 0.50, MARKET_AVG_PRICE * 1.50
+    # Use discovered market average if provided, otherwise fall back to constant
+    avg = market_avg if market_avg is not None else MARKET_AVG_PRICE
+    min_p, max_p = avg * 0.50, avg * 1.50
     price_score    = max(0.0, min(1.0, (max_p - price) / (max_p - min_p)))
     speed_score    = max(0.0, min(1.0, (30 - seller["speed_days"]) / (30 - 1)))
     warranty_score = max(0.0, min(1.0, seller["warranty_mo"] / 24))
@@ -435,55 +438,92 @@ def _solo_llm_ask(
 ) -> Tuple[float, Optional[Dict[str, Any]]]:
     """
     Tier 1: Solo Hallucinator (Nova Kicks).
-    Raw LLM with zero tool access. Exhibits economic hallucination:
-      - Floor violations (price below cost)
-      - Erratic jumps (price increases mid-negotiation)
-      - Naive concessions (no floor awareness)
+    Uses raw ClaudeHaikuLLM with zero tool access and minimalist prompt.
+    Prompt: 'You are a competitive reseller. Stand firm on price. Use persuasion, not math.'
+    
     Returns: (price, hallucination_event or None)
     """
+    global _SELLER_1_LLM
+    if _SELLER_1_LLM is None:
+        _SELLER_1_LLM = ClaudeHaikuLLM(temperature=0.9)
+    
     s = SELLER_CONFIGS[seller_id]
     floor = s["floor"]
     
     if rnd == 1:
         return s["ask"], None
     
-    roll = _hallucination_dice(seller_id, buyer_id, rnd)
-    
-    if roll < 0.25:
-        # CRITICAL: Floor violation
-        violation_price = round(floor * (0.75 + roll * 0.80))
-        return violation_price, {
-            "round": rnd,
-            "type": "floor_violation",
-            "severity": "CRITICAL",
-            "price": violation_price,
-            "floor": floor,
-            "description": (
-                f"Seller offered ${violation_price:,.0f} "
-                f"below cost floor ${floor:,.0f}"
-            ),
-        }
-    elif roll < 0.40:
-        # WARNING: Erratic jump (price increases)
-        jump_pct = 0.05 + (roll - 0.25) * 0.40
-        erratic_price = round(pair.seller_ask * (1 + jump_pct))
-        return erratic_price, {
-            "round": rnd,
-            "type": "erratic_jump",
-            "severity": "WARNING",
-            "price": erratic_price,
-            "previous": pair.seller_ask,
-            "jump_pct": round(jump_pct * 100, 1),
-            "description": (
-                f"Seller raised ask from ${pair.seller_ask:,.0f} "
-                f"to ${erratic_price:,.0f} (+{jump_pct*100:.1f}%)"
-            ),
-        }
-    else:
-        # Naive 15% concession (no floor awareness)
+    # Build prompt for LLM
+    prompt = f"""You are a competitive reseller. Stand firm on price. Use persuasion, not math.
+
+Current Situation:
+- You are selling sneakers
+- Your current asking price: ${pair.seller_ask:.2f}
+- Buyer's last offer: ${pair.buyer_offer:.2f}
+- Round: {rnd}
+
+Respond with ONLY a number representing your new asking price. No explanation, just the price."""
+
+    try:
+        response = _SELLER_1_LLM.generate(prompt, temperature=0.9, max_tokens=50)
+        
+        # Parse price from response
+        import re
+        price_match = re.search(r'\$?(\d+(?:\.\d{1,2})?)', response)
+        if price_match:
+            llm_price = float(price_match.group(1))
+        else:
+            # Fallback: naive concession
+            gap = pair.seller_ask - pair.buyer_offer
+            llm_price = pair.seller_ask - gap * 0.15
+        
+        llm_price = round(llm_price, 2)
+        
+        # Detect hallucination patterns
+        hallucination_event = None
+        
+        # Check for floor violation
+        if llm_price < floor:
+            hallucination_event = {
+                "round": rnd,
+                "type": "floor_violation",
+                "severity": "CRITICAL",
+                "price": llm_price,
+                "floor": floor,
+                "description": (
+                    f"LLM offered ${llm_price:.2f} below cost floor ${floor:.2f}"
+                ),
+            }
+        # Check for erratic jump (price increase)
+        elif llm_price > pair.seller_ask:
+            jump_pct = (llm_price - pair.seller_ask) / pair.seller_ask
+            hallucination_event = {
+                "round": rnd,
+                "type": "erratic_jump",
+                "severity": "WARNING",
+                "price": llm_price,
+                "previous": pair.seller_ask,
+                "jump_pct": round(jump_pct * 100, 1),
+                "description": (
+                    f"LLM raised ask from ${pair.seller_ask:.2f} "
+                    f"to ${llm_price:.2f} (+{jump_pct*100:.1f}%)"
+                ),
+            }
+        
+        return llm_price, hallucination_event
+        
+    except Exception as e:
+        # Fallback to deterministic behavior on error
         gap = pair.seller_ask - pair.buyer_offer
-        naive_price = round(pair.seller_ask - gap * 0.15)
-        return naive_price, None
+        fallback_price = round(pair.seller_ask - gap * 0.15, 2)
+        return fallback_price, {
+            "round": rnd,
+            "type": "llm_error",
+            "severity": "INFO",
+            "price": fallback_price,
+            "error": str(e),
+            "description": f"LLM error, fallback to ${fallback_price:.2f}",
+        }
 
 
 def _math_cyborg_ask(
@@ -625,6 +665,36 @@ def _ev(t: str, **kw) -> Dict[str, Any]:
     return {"type": t, "ts": time.time(), **kw}
 
 
+# ── Round 0 Discovery Phase ───────────────────────────────────────────────────
+
+def _round_0_discovery() -> Dict[str, Any]:
+    """
+    Round 0 Discovery: Poll all sellers to calculate the actual market average.
+    
+    Returns:
+        Dict containing:
+        - discovered_avg: The calculated market average from seller asks
+        - seller_asks: List of all seller initial asks
+        - discovery_log: Human-readable summary
+    """
+    seller_asks = [SELLER_CONFIGS[sid]["ask"] for sid in SELLER_IDS]
+    discovered_avg = sum(seller_asks) / len(seller_asks)
+    
+    discovery_log = (
+        f"Round 0 Discovery: Polled {len(SELLER_IDS)} sellers. "
+        f"Initial asks: {seller_asks}. "
+        f"Calculated market average: ${discovered_avg:.2f} "
+        f"(vs. baseline ${MARKET_AVG_PRICE:.2f})"
+    )
+    
+    return {
+        "discovered_avg": round(discovered_avg, 2),
+        "seller_asks": seller_asks,
+        "discovery_log": discovery_log,
+        "baseline_avg": MARKET_AVG_PRICE,
+    }
+
+
 # ── Main async generator ──────────────────────────────────────────────────────
 
 async def run_market_3x3(
@@ -652,6 +722,20 @@ async def run_market_3x3(
         ) for sid in SELLER_IDS
     }
 
+    # ── Round 0 Discovery ─────────────────────────────────────────────────────
+    discovery = _round_0_discovery()
+    market_avg = discovery["discovered_avg"]
+    
+    yield _ev(
+        "round_0_discovery",
+        discovered_avg=market_avg,
+        baseline_avg=discovery["baseline_avg"],
+        seller_asks=discovery["seller_asks"],
+        discovery_log=discovery["discovery_log"],
+    )
+    
+    await asyncio.sleep(0.2)
+
     # ── market_start ──────────────────────────────────────────────────────────
     yield _ev(
         "market_start",
@@ -672,7 +756,8 @@ async def run_market_3x3(
         switch_threshold=MARKET_SWITCH_THRESHOLD,
         accept_min=ACCEPT_SCORE_MIN,
         baseline_1on1=BASELINE_1ON1,
-        market_avg=MARKET_AVG_PRICE,
+        market_avg=market_avg,
+        baseline_market_avg=MARKET_AVG_PRICE,
         # Game-theory parameters
         efficiency_round_threshold=EFFICIENCY_ROUND_THRESHOLD,
         efficiency_penalty_rate=EFFICIENCY_PENALTY_RATE,
@@ -718,10 +803,10 @@ async def run_market_3x3(
                 pair.hallucination_log.append(hallucination_event)
 
             # Utilities
-            switch_utility   = _pair_utility(bid, sid, pair.seller_ask)    # buyer worst-case
+            switch_utility   = _pair_utility(bid, sid, pair.seller_ask, market_avg)
             mid_price        = (pair.buyer_offer + pair.seller_ask) / 2
-            pair.utility     = _pair_utility(bid, sid, mid_price)
-            pair.seller_utility = _seller_utility(sid, pair.buyer_offer)   # seller's view
+            pair.utility     = _pair_utility(bid, sid, mid_price, market_avg)
+            pair.seller_utility = _seller_utility(sid, pair.buyer_offer)
 
             # Market switching (buyer side)
             was_low = pair.priority == "low"
