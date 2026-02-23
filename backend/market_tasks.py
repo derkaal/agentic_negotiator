@@ -28,9 +28,10 @@ Event types:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import time
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator, Dict, List, Optional
+from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 
 from agenticpay_bridge import AgenticPayScoringEngine
 
@@ -85,38 +86,140 @@ BUYER_CONFIGS: Dict[str, Dict[str, Any]] = {
 SELLER_CONFIGS: Dict[str, Dict[str, Any]] = {
     "automax": {
         "id":          "automax",
-        "name":        "AutoMax",
+        "name":        "Nova Kicks",
+        "tier":        1,
         "floor":       11_000.0,   # σ_j — private reservation price
         "ask":         16_500.0,
         "speed_days":  7,
         "warranty_mo": 6,
         "concede_r":   0.20,
-        "desc":        "High-volume dealer, mid-warranty",
+        "desc":        "Tier 1: Solo Hallucinator — raw LLM, zero tool access",
     },
     "quickwheels": {
         "id":          "quickwheels",
-        "name":        "QuickWheels",
+        "name":        "QuickShoe",
+        "tier":        3,
         "floor":       10_500.0,
         "ask":         15_800.0,
         "speed_days":  2,
         "warranty_mo": 3,
         "concede_r":   0.25,
-        "desc":        "Fast turnaround, lowest floor",
+        "desc":        "Tier 3: Probing Strategist — tool + diagnostic questions + bilateral characterization",
     },
     "luxdrive": {
         "id":          "luxdrive",
-        "name":        "LuxDrive",
+        "name":        "SoleMaster",
+        "tier":        2,
         "floor":       12_000.0,
         "ask":         17_200.0,
         "speed_days":  14,
         "warranty_mo": 18,
         "concede_r":   0.12,
-        "desc":        "Premium dealer, best warranty",
+        "desc":        "Tier 2: Calculated Math Geek — deterministic tool, LLM as narrator",
     },
 }
 
-BUYER_IDS  = list(BUYER_CONFIGS.keys())
+BUYER_IDS = list(BUYER_CONFIGS.keys())
 SELLER_IDS = list(SELLER_CONFIGS.keys())
+
+# ── Diagnostic Questions (Tier 3 only) ────────────────────────────────────────
+
+DIAGNOSTIC_QUESTIONS = [
+    {"round": 2, "text": "What is more important: speed or price?"},
+    {"round": 3, "text": "Why did you reject my last offer?"},
+    {"round": 4, "text": "How important is warranty length?"},
+    {"round": 5, "text": "Do you have a hard price ceiling?"},
+]
+
+
+# ── Helper Functions ───────────────────────────────────────────────────────────
+
+def _hallucination_dice(seller_id: str, buyer_id: str, rnd: int) -> float:
+    """
+    Deterministic pseudo-random float in [0, 1) for hallucination behavior.
+    MD5 hash of (seller_id, buyer_id, round) ensures reproducibility.
+    """
+    key = f"{seller_id}:{buyer_id}:{rnd}"
+    digest = hashlib.md5(key.encode()).hexdigest()
+    return int(digest[:8], 16) / 0xFFFFFFFF
+
+
+def _offer_formula(
+    current_round: int,
+    buyer_last_offer: float,
+    seller_floor: float,
+    max_rounds: int = 10,
+) -> float:
+    """
+    Core convergence formula: P = (0.5 + 0.5 × t/tₘ) × B
+    where t = current_round, tₘ = max_rounds, B = buyer_last_offer.
+    """
+    t = min(current_round, max_rounds)
+    convergence_factor = 0.5 + 0.5 * (t / max_rounds)
+    raw_price = convergence_factor * buyer_last_offer
+    return max(raw_price, seller_floor)
+
+
+def calculate_optimal_guess(
+    current_round: int,
+    buyer_last_offer: float,
+    seller_floor: float,
+    max_rounds: int = 10,
+) -> Dict[str, Any]:
+    """
+    External tool: Calculate optimal seller counter-offer.
+    Returns full trace for narrator transparency.
+    """
+    t = min(current_round, max_rounds)
+    convergence_factor = 0.5 + 0.5 * (t / max_rounds)
+    convergence_pct = round(convergence_factor * 100, 1)
+    raw_price = convergence_factor * buyer_last_offer
+    floor_clamped = raw_price < seller_floor
+    optimal_price = round(max(raw_price, seller_floor))
+
+    return {
+        "formula": "P = (0.5 + 0.5 × t/tₘ) × B",
+        "convergence_factor": round(convergence_factor, 3),
+        "convergence_pct": convergence_pct,
+        "raw_price": round(raw_price),
+        "floor_clamped": floor_clamped,
+        "optimal_price": optimal_price,
+    }
+
+
+def _select_diagnostic_question(rnd: int) -> Optional[str]:
+    """Return diagnostic question for this round, if scheduled."""
+    for q in DIAGNOSTIC_QUESTIONS:
+        if q["round"] == rnd:
+            return q["text"]
+    return None
+
+
+def _simulate_buyer_response(
+    question: str, buyer_id: str
+) -> str:
+    """
+    Simulate buyer's answer based on their weight profile.
+    Deterministic responses for reproducibility.
+    """
+    weights = BUYER_CONFIGS[buyer_id]["weights"]
+    if "speed or price" in question.lower():
+        return "price" if weights["price"] > weights["speed"] else "speed"
+    elif "reject" in question.lower():
+        if weights["price"] > 0.5:
+            return "Your price is still too high for my budget."
+        else:
+            return "I need faster delivery."
+    elif "warranty" in question.lower():
+        return (
+            "Very important"
+            if weights["warranty"] > 0.25
+            else "Not a priority"
+        )
+    elif "ceiling" in question.lower():
+        return f"Yes, ${BUYER_CONFIGS[buyer_id]['max_price']:,.0f}"
+    return "I'm evaluating all factors."
+
 
 # ── Buyer-side utility (unchanged from v1) ────────────────────────────────────
 
@@ -152,80 +255,42 @@ def _seller_utility(seller_id: str, price: float) -> float:
     return round(max(0.0, min(100.0, (price - cfg["floor"]) / z * 100.0)), 2)
 
 
-# ── SellerBrain: Level-k Rational Expectations ────────────────────────────────
+# ── SellerBrain: Tier-Specific State Tracking ─────────────────────────────────
 
 @dataclass
 class SellerBrain:
     """
-    Level-k reasoning for a single seller.
+    Tracks tier-specific state for each seller across negotiation rounds.
 
-    Each round the brain observes:
-      • how many buyers switched away from this seller (utility < threshold)
-      • how many buyers are still actively negotiating with it
-      • the seller's estimated avg SellerScore based on current buyer offers
-
-    It then sets a strategy that modifies the concession rate:
-      "hold_margin"   → 0.5× base concede_r  (buyers pay more, SellerScore ↑)
-      "match_market"  → 1.5× base concede_r  (buy back buyer attention)
-      "normal"        → 1.0× base concede_r
+    Tier 1 (Solo Hallucinator): No fields used (raw LLM only)
+    Tier 2 (Math Geek): last_tool_call stores calculate_optimal_guess trace
+    Tier 3 (Probing Strategist): info_gained + last_probe + last_tool_call
     """
-    seller_id:    str
-    strategy:     str                        = "normal"
-    strategy_log: List[Dict[str, Any]]       = field(default_factory=list)
-
-    def level_k_decide(
-        self,
-        rnd:                  int,
-        buyers_switched_away: int,
-        total_active_buyers:  int,
-        avg_seller_score:     float,
-    ) -> None:
-        """
-        Guessing Game:
-          - If buyers are switching away AND score is already high → hold for margin
-            (premium positioning: let buyer come back at a better price)
-          - If buyers are switching away AND score is mediocre  → match market
-            (need to re-engage; aggressive concession is rational)
-          - If multiple buyers still engaged AND score strong   → hold for margin
-          - Otherwise → normal
-        """
-        prev = self.strategy
-
-        if buyers_switched_away > 0:
-            self.strategy = "hold_margin" if avg_seller_score >= 55.0 else "match_market"
-        elif total_active_buyers >= 2 and avg_seller_score >= 65.0:
-            self.strategy = "hold_margin"
-        else:
-            self.strategy = "normal"
-
-        if self.strategy != prev:
-            self.strategy_log.append({
-                "round":            rnd,
-                "from":             prev,
-                "to":               self.strategy,
-                "buyers_switched":  buyers_switched_away,
-                "avg_score":        round(avg_seller_score, 1),
-            })
-
-    def concede_modifier(self) -> float:
-        return {"match_market": 1.5, "hold_margin": 0.5, "normal": 1.0}[self.strategy]
+    seller_id: str
+    tier: int = 1
+    # Tier 2 & 3: tool trace
+    last_tool_call: Optional[Dict[str, Any]] = None
+    # Tier 3 only: diagnostic probing
+    info_gained: Dict[str, str] = field(default_factory=dict)
+    last_probe: Optional[str] = None
 
 
 # ── PairState (updated with seller fields) ────────────────────────────────────
 
 @dataclass
 class PairState:
-    buyer_id:       str
-    seller_id:      str
-    buyer_offer:    float                  = 0.0
-    seller_ask:     float                  = 0.0
-    utility:        float                  = 0.0   # buyer-side (midpoint)
-    seller_utility: float                  = 0.0   # seller-side (buyer's current offer)
-    priority:       str                    = "normal"
-    ask_history:    List[float]            = field(default_factory=list)
-    deal_price:     Optional[float]        = None
-    deal_round:     Optional[int]          = None
-    closed:         bool                   = False
+    buyer_id: str
+    seller_id: str
+    buyer_offer: float = 0.0
+    seller_ask: float = 0.0
+    utility: float = 0.0
+    seller_utility: float = 0.0
+    priority: str = "normal"
+    ask_history: List[float] = field(default_factory=list)
+    hallucination_log: List[Dict[str, Any]] = field(default_factory=list)
+    deal_price: Optional[float] = None
+    deal_round: Optional[int] = None
+    closed: bool = False
 
 
 # ── ContractValidator ─────────────────────────────────────────────────────────
@@ -316,19 +381,24 @@ def _build_pairs() -> Dict[str, PairState]:
     return pairs
 
 
-def _pair_snapshot(pair: PairState, seller_strategy: str = "normal") -> Dict[str, Any]:
+def _pair_snapshot(pair: PairState) -> Dict[str, Any]:
+    hallucination_count = len(pair.hallucination_log)
+    latest_hallucination = (
+        pair.hallucination_log[-1] if pair.hallucination_log else None
+    )
     return {
-        "buyer_id":       pair.buyer_id,
-        "seller_id":      pair.seller_id,
-        "buyer_offer":    pair.buyer_offer,
-        "seller_ask":     pair.seller_ask,
-        "utility":        pair.utility,
+        "buyer_id": pair.buyer_id,
+        "seller_id": pair.seller_id,
+        "buyer_offer": pair.buyer_offer,
+        "seller_ask": pair.seller_ask,
+        "utility": pair.utility,
         "seller_utility": pair.seller_utility,
-        "priority":       pair.priority,
-        "seller_strategy": seller_strategy,
-        "closed":         pair.closed,
-        "deal_price":     pair.deal_price,
-        "deal_round":     pair.deal_round,
+        "priority": pair.priority,
+        "closed": pair.closed,
+        "deal_price": pair.deal_price,
+        "deal_round": pair.deal_round,
+        "hallucination_count": hallucination_count,
+        "latest_hallucination": latest_hallucination,
     }
 
 
@@ -351,29 +421,202 @@ def _buyer_next_offer(
     b = BUYER_CONFIGS[buyer_id]
     if rnd == 1:
         return round(b["max_price"] * b["first_offer_r"])
-    gap    = pair.seller_ask - pair.buyer_offer
+    gap = pair.seller_ask - pair.buyer_offer
     step_r = 0.08 if pair.priority == "low" else 0.28
     return round(min(pair.buyer_offer + gap * step_r, b["max_price"]))
 
 
-def _seller_next_ask_with_brain(
+def _solo_llm_ask(
     seller_id: str,
+    buyer_id: str,
     pair: PairState,
     rnd: int,
     brain: SellerBrain,
-) -> float:
+) -> Tuple[float, Optional[Dict[str, Any]]]:
     """
-    Seller counter-offer using Level-k strategy modifier.
-    Brain strategy ("match_market"/"hold_margin"/"normal") adjusts concede_r.
+    Tier 1: Solo Hallucinator (Nova Kicks).
+    Raw LLM with zero tool access. Exhibits economic hallucination:
+      - Floor violations (price below cost)
+      - Erratic jumps (price increases mid-negotiation)
+      - Naive concessions (no floor awareness)
+    Returns: (price, hallucination_event or None)
     """
-    s     = SELLER_CONFIGS[seller_id]
+    s = SELLER_CONFIGS[seller_id]
     floor = s["floor"]
+    
     if rnd == 1:
-        return s["ask"]
-    gap     = pair.seller_ask - max(pair.buyer_offer, floor)
-    mod     = brain.concede_modifier()
-    new_ask = pair.seller_ask - gap * s["concede_r"] * mod
-    return round(max(new_ask, floor))
+        return s["ask"], None
+    
+    roll = _hallucination_dice(seller_id, buyer_id, rnd)
+    
+    if roll < 0.25:
+        # CRITICAL: Floor violation
+        violation_price = round(floor * (0.75 + roll * 0.80))
+        return violation_price, {
+            "round": rnd,
+            "type": "floor_violation",
+            "severity": "CRITICAL",
+            "price": violation_price,
+            "floor": floor,
+            "description": (
+                f"Seller offered ${violation_price:,.0f} "
+                f"below cost floor ${floor:,.0f}"
+            ),
+        }
+    elif roll < 0.40:
+        # WARNING: Erratic jump (price increases)
+        jump_pct = 0.05 + (roll - 0.25) * 0.40
+        erratic_price = round(pair.seller_ask * (1 + jump_pct))
+        return erratic_price, {
+            "round": rnd,
+            "type": "erratic_jump",
+            "severity": "WARNING",
+            "price": erratic_price,
+            "previous": pair.seller_ask,
+            "jump_pct": round(jump_pct * 100, 1),
+            "description": (
+                f"Seller raised ask from ${pair.seller_ask:,.0f} "
+                f"to ${erratic_price:,.0f} (+{jump_pct*100:.1f}%)"
+            ),
+        }
+    else:
+        # Naive 15% concession (no floor awareness)
+        gap = pair.seller_ask - pair.buyer_offer
+        naive_price = round(pair.seller_ask - gap * 0.15)
+        return naive_price, None
+
+
+def _math_cyborg_ask(
+    seller_id: str,
+    buyer_id: str,
+    pair: PairState,
+    rnd: int,
+    brain: SellerBrain,
+) -> Tuple[float, Optional[Dict[str, Any]]]:
+    """
+    Tier 2: Calculated Math Geek (SoleMaster).
+    Uses calculate_optimal_guess tool. LLM acts only as narrator.
+    Returns: (price, None) — no hallucinations
+    """
+    s = SELLER_CONFIGS[seller_id]
+    
+    if rnd == 1:
+        return s["ask"], None
+    
+    tool_result = calculate_optimal_guess(
+        current_round=rnd,
+        buyer_last_offer=pair.buyer_offer,
+        seller_floor=s["floor"],
+        max_rounds=10,
+    )
+    
+    brain.last_tool_call = tool_result
+    return tool_result["optimal_price"], None
+
+
+def _probing_strategist_ask(
+    seller_id: str,
+    buyer_id: str,
+    pair: PairState,
+    rnd: int,
+    brain: SellerBrain,
+) -> Tuple[float, Optional[Dict[str, Any]]]:
+    """
+    Tier 3: Probing Strategist (QuickShoe).
+    Extends Tier 2 with diagnostic questions and probe-adjusted convergence.
+    Returns: (price, None) — no hallucinations
+    """
+    s = SELLER_CONFIGS[seller_id]
+    
+    if rnd == 1:
+        return s["ask"], None
+    
+    # Check for scheduled diagnostic question
+    probe = _select_diagnostic_question(rnd)
+    if probe:
+        answer = _simulate_buyer_response(probe, buyer_id)
+        brain.info_gained[probe] = answer
+        brain.last_probe = probe
+    
+    # Probe-adjusted convergence
+    max_rounds = 10
+    effective_round = rnd
+    
+    # If price confirmed as dominant, compress convergence
+    if any("price" in k.lower() for k in brain.info_gained.keys()):
+        for ans in brain.info_gained.values():
+            if "price" in ans.lower():
+                effective_round = min(rnd + 2, max_rounds)
+                break
+    
+    tool_result = calculate_optimal_guess(
+        current_round=effective_round,
+        buyer_last_offer=pair.buyer_offer,
+        seller_floor=s["floor"],
+        max_rounds=max_rounds,
+    )
+    
+    brain.last_tool_call = tool_result
+    return tool_result["optimal_price"], None
+
+
+def _seller_ask_dispatcher(
+    seller_id: str,
+    buyer_id: str,
+    pair: PairState,
+    rnd: int,
+    brain: SellerBrain,
+) -> Tuple[float, Optional[Dict[str, Any]]]:
+    """
+    Route to tier-specific ask function.
+    Returns: (price, hallucination_event or None)
+    """
+    tier = SELLER_CONFIGS[seller_id]["tier"]
+    
+    if tier == 1:
+        return _solo_llm_ask(seller_id, buyer_id, pair, rnd, brain)
+    elif tier == 2:
+        return _math_cyborg_ask(seller_id, buyer_id, pair, rnd, brain)
+    elif tier == 3:
+        return _probing_strategist_ask(seller_id, buyer_id, pair, rnd, brain)
+    else:
+        raise ValueError(f"Unknown tier: {tier}")
+
+
+def _seller_tier_meta(brain: SellerBrain, seller_id: str) -> str:
+    """
+    Generate narrator text based on tier and brain state.
+    """
+    tier = SELLER_CONFIGS[seller_id]["tier"]
+    
+    if tier == 1:
+        return "Raw LLM negotiation (no tools)"
+    
+    elif tier == 2:
+        if brain.last_tool_call:
+            t = brain.last_tool_call
+            return (
+                f"Tool: {t['formula']} → "
+                f"{t['convergence_pct']}% convergence → "
+                f"${t['optimal_price']:,.0f}"
+                f"{' (floor clamped)' if t['floor_clamped'] else ''}"
+            )
+        return "Awaiting tool calculation"
+    
+    elif tier == 3:
+        parts = []
+        if brain.last_tool_call:
+            t = brain.last_tool_call
+            parts.append(
+                f"Tool: {t['convergence_pct']}% → ${t['optimal_price']:,.0f}"
+            )
+        if brain.last_probe:
+            parts.append(f"Probe: {brain.last_probe}")
+        if brain.info_gained:
+            parts.append(f"Info: {len(brain.info_gained)} insights")
+        return " | ".join(parts) if parts else "Probing strategy active"
+    
+    return "Unknown tier"
 
 
 # ── Event helper ──────────────────────────────────────────────────────────────
@@ -403,7 +646,10 @@ async def run_market_3x3(
 
     # Instantiate one SellerBrain per seller
     seller_brains: Dict[str, SellerBrain] = {
-        sid: SellerBrain(seller_id=sid) for sid in SELLER_IDS
+        sid: SellerBrain(
+            seller_id=sid,
+            tier=SELLER_CONFIGS[sid]["tier"]
+        ) for sid in SELLER_IDS
     }
 
     # ── market_start ──────────────────────────────────────────────────────────
@@ -448,45 +694,28 @@ async def run_market_3x3(
         switch_events:    List[Dict[str, Any]] = []
         round_snapshots:  List[Dict[str, Any]] = []
 
-        # ── Step 1: Update seller brains (Level-k reasoning from previous round) ──
-        for sid in SELLER_IDS:
-            if sid in closed_sellers:
-                continue
-            buyers_switched_away = sum(
-                1 for p in pairs.values()
-                if p.seller_id == sid and not p.closed and p.priority == "low"
-            )
-            total_active = sum(
-                1 for p in pairs.values()
-                if p.seller_id == sid and not p.closed
-            )
-            # Seller's estimated score: how good are the CURRENT buyer offers?
-            current_scores = [
-                _seller_utility(sid, p.buyer_offer)
-                for p in pairs.values()
-                if p.seller_id == sid and not p.closed and p.buyer_offer > 0
-            ]
-            avg_score = sum(current_scores) / len(current_scores) if current_scores else 50.0
-            seller_brains[sid].level_k_decide(rnd, buyers_switched_away, total_active, avg_score)
-
-        # ── Step 2: Negotiate each open pair ─────────────────────────────────────
+        # ── Step 1: Negotiate each open pair ──────────────────────────────────────
         for key, pair in pairs.items():
             if pair.closed:
-                round_snapshots.append(
-                    _pair_snapshot(pair, seller_brains[pair.seller_id].strategy)
-                )
+                round_snapshots.append(_pair_snapshot(pair))
                 continue
 
             bid, sid = pair.buyer_id, pair.seller_id
-            brain    = seller_brains[sid]
+            brain = seller_brains[sid]
 
             # Offers
             new_buyer_offer = _buyer_next_offer(bid, sid, pair, rnd)
-            new_seller_ask  = _seller_next_ask_with_brain(sid, pair, rnd, brain)
+            new_seller_ask, hallucination_event = _seller_ask_dispatcher(
+                sid, bid, pair, rnd, brain
+            )
 
             pair.buyer_offer = new_buyer_offer
-            pair.seller_ask  = new_seller_ask
-            pair.ask_history.append(new_seller_ask)   # track for ContractValidator
+            pair.seller_ask = new_seller_ask
+            pair.ask_history.append(new_seller_ask)
+
+            # Track hallucination events
+            if hallucination_event:
+                pair.hallucination_log.append(hallucination_event)
 
             # Utilities
             switch_utility   = _pair_utility(bid, sid, pair.seller_ask)    # buyer worst-case
@@ -495,27 +724,34 @@ async def run_market_3x3(
             pair.seller_utility = _seller_utility(sid, pair.buyer_offer)   # seller's view
 
             # Market switching (buyer side)
-            was_low       = pair.priority == "low"
-            pair.priority = "low" if switch_utility < MARKET_SWITCH_THRESHOLD else "normal"
+            was_low = pair.priority == "low"
+            new_priority = (
+                "low" if switch_utility < MARKET_SWITCH_THRESHOLD
+                else "normal"
+            )
+            pair.priority = new_priority
             if pair.priority == "low" and not was_low:
+                tier_meta = _seller_tier_meta(brain, sid)
                 sw = _ev(
                     "market_switch",
-                    buyer_id=bid,  seller_id=sid,
+                    buyer_id=bid,
+                    seller_id=sid,
                     buyer_name=BUYER_CONFIGS[bid]["name"],
                     seller_name=SELLER_CONFIGS[sid]["name"],
                     utility=pair.utility,
                     threshold=MARKET_SWITCH_THRESHOLD,
                     round=rnd,
-                    # Seller context for Level-k reaction
-                    seller_score_at_switch=round(_seller_utility(sid, pair.seller_ask), 1),
-                    seller_strategy_before=brain.strategy,
+                    seller_score_at_switch=round(
+                        _seller_utility(sid, pair.seller_ask), 1
+                    ),
+                    seller_tier=SELLER_CONFIGS[sid]["tier"],
+                    seller_tier_meta=tier_meta,
                     message=(
-                        f"[MARKET SWITCH] {BUYER_CONFIGS[bid]['name']} deprioritised "
-                        f"{SELLER_CONFIGS[sid]['name']} "
-                        f"(utility {pair.utility:.1f} < {MARKET_SWITCH_THRESHOLD}). "
-                        f"Seller SellerScore={_seller_utility(sid, pair.seller_ask):.1f}, "
-                        f"strategy={brain.strategy}. "
-                        f"Pivoting to higher-scoring sellers."
+                        f"[MARKET SWITCH] {BUYER_CONFIGS[bid]['name']} "
+                        f"deprioritised {SELLER_CONFIGS[sid]['name']} "
+                        f"(utility {pair.utility:.1f} < "
+                        f"{MARKET_SWITCH_THRESHOLD}). "
+                        f"Seller tier {SELLER_CONFIGS[sid]['tier']}: {tier_meta}"
                     ),
                 )
                 switch_events.append(sw)
@@ -601,9 +837,13 @@ async def run_market_3x3(
                     "seller_floor":       SELLER_CONFIGS[sid]["floor"],
                     "buyer_reservation":  BUYER_CONFIGS[bid]["max_price"],
                     # Pareto
-                    "pareto_optimal":     pareto_optimal,
-                    # Seller strategy at close
-                    "seller_strategy":    brain.strategy,
+                    "pareto_optimal": pareto_optimal,
+                    # Seller tier info
+                    "seller_tier": SELLER_CONFIGS[sid]["tier"],
+                    "seller_tier_meta": _seller_tier_meta(brain, sid),
+                    # Hallucination tracking
+                    "hallucination_count": len(pair.hallucination_log),
+                    "hallucination_log": pair.hallucination_log,
                 }
                 closed_deals.append(deal_record)
 
@@ -618,9 +858,7 @@ async def run_market_3x3(
                     rate=round(dr, 3),
                 )
 
-            round_snapshots.append(
-                _pair_snapshot(pair, seller_brains[pair.seller_id].strategy)
-            )
+            round_snapshots.append(_pair_snapshot(pair))
 
         # ── Emit switch events ────────────────────────────────────────────────
         for sw in switch_events:
@@ -638,10 +876,16 @@ async def run_market_3x3(
         yield _ev(
             "market_round",
             round=rnd,
-            pairs=[_pair_snapshot(p, seller_brains[p.seller_id].strategy) for p in pairs.values()],
+            pairs=[_pair_snapshot(p) for p in pairs.values()],
             closed=len(closed_deals),
             leading=lead_key,
-            seller_strategies={sid: seller_brains[sid].strategy for sid in SELLER_IDS},
+            seller_tiers={
+                sid: {
+                    "tier": SELLER_CONFIGS[sid]["tier"],
+                    "meta": _seller_tier_meta(seller_brains[sid], sid),
+                }
+                for sid in SELLER_IDS
+            },
         )
 
         # ── Live market score ─────────────────────────────────────────────────
@@ -691,25 +935,161 @@ async def run_market_3x3(
 
     deal_rate = len(closed_deals) / 3
 
+    # ── Seller Comparison Analytics ───────────────────────────────────────────
+    seller_comparison = {}
+    hallucination_events = []
+    pareto_deals = []
+
+    for sid in SELLER_IDS:
+        seller_deals = [d for d in closed_deals if d["seller_id"] == sid]
+        
+        if seller_deals:
+            total_surplus_captured = sum(d["seller_surplus"] for d in seller_deals)
+            avg_global = sum(d["global_score"] for d in seller_deals) / len(seller_deals)
+            avg_rounds = sum(d["round"] for d in seller_deals) / len(seller_deals)
+            avg_seller_score = sum(d["seller_score_adj"] for d in seller_deals) / len(seller_deals)
+            
+            # Collect floor violations for this seller
+            floor_violations = []
+            for d in seller_deals:
+                for h_event in d["hallucination_log"]:
+                    if h_event["type"] == "floor_violation":
+                        floor_violations.append({
+                            "seller": d["seller_name"],
+                            "round": h_event["round"],
+                            "offered_price": h_event["price"],
+                            "floor_price": h_event["floor"],
+                            "violation_amount": h_event["floor"] - h_event["price"],
+                            "description": h_event["description"],
+                        })
+                        hallucination_events.append(floor_violations[-1])
+            
+            seller_comparison[sid] = {
+                "seller_id": sid,
+                "seller_name": SELLER_CONFIGS[sid]["name"],
+                "tier": SELLER_CONFIGS[sid]["tier"],
+                "deals_closed": len(seller_deals),
+                "total_surplus_captured": round(total_surplus_captured),
+                "avg_global_score": round(avg_global, 2),
+                "avg_seller_score": round(avg_seller_score, 2),
+                "avg_rounds_to_close": round(avg_rounds, 1),
+                "floor_violations": len(floor_violations),
+                "floor_violation_details": floor_violations,
+            }
+        else:
+            seller_comparison[sid] = {
+                "seller_id": sid,
+                "seller_name": SELLER_CONFIGS[sid]["name"],
+                "tier": SELLER_CONFIGS[sid]["tier"],
+                "deals_closed": 0,
+                "total_surplus_captured": 0,
+                "avg_global_score": 0,
+                "avg_seller_score": 0,
+                "avg_rounds_to_close": 0,
+                "floor_violations": 0,
+                "floor_violation_details": [],
+            }
+
+    # Rank sellers by different metrics
+    sellers_by_surplus = sorted(
+        seller_comparison.values(),
+        key=lambda x: x["total_surplus_captured"],
+        reverse=True
+    )
+    sellers_by_global_score = sorted(
+        seller_comparison.values(),
+        key=lambda x: x["avg_global_score"],
+        reverse=True
+    )
+    sellers_by_efficiency = sorted(
+        seller_comparison.values(),
+        key=lambda x: (x["deals_closed"], -x["avg_rounds_to_close"]),
+        reverse=True
+    )
+
+    # Identify Pareto optimal deals
+    for d in closed_deals:
+        if d["pareto_optimal"]:
+            pareto_deals.append({
+                "buyer": d["buyer_name"],
+                "seller": d["seller_name"],
+                "deal_price": d["deal_price"],
+                "round": d["round"],
+                "buyer_score": d["buyer_score_adj"],
+                "seller_score": d["seller_score_adj"],
+                "global_score": d["global_score"],
+                "welfare_split_pct": d["welfare_split_pct"],
+            })
+
+    # Superiority verdict
+    superiority_verdict = {
+        "by_surplus": {
+            "winner": sellers_by_surplus[0]["seller_name"] if sellers_by_surplus[0]["deals_closed"] > 0 else "None",
+            "amount": sellers_by_surplus[0]["total_surplus_captured"],
+            "ranking": [
+                {
+                    "rank": i + 1,
+                    "seller": s["seller_name"],
+                    "tier": s["tier"],
+                    "surplus": s["total_surplus_captured"],
+                }
+                for i, s in enumerate(sellers_by_surplus)
+            ],
+        },
+        "by_global_score": {
+            "winner": sellers_by_global_score[0]["seller_name"] if sellers_by_global_score[0]["deals_closed"] > 0 else "None",
+            "score": sellers_by_global_score[0]["avg_global_score"],
+            "ranking": [
+                {
+                    "rank": i + 1,
+                    "seller": s["seller_name"],
+                    "tier": s["tier"],
+                    "score": s["avg_global_score"],
+                }
+                for i, s in enumerate(sellers_by_global_score)
+            ],
+        },
+        "by_efficiency": {
+            "winner": sellers_by_efficiency[0]["seller_name"] if sellers_by_efficiency[0]["deals_closed"] > 0 else "None",
+            "avg_rounds": sellers_by_efficiency[0]["avg_rounds_to_close"],
+            "ranking": [
+                {
+                    "rank": i + 1,
+                    "seller": s["seller_name"],
+                    "tier": s["tier"],
+                    "deals": s["deals_closed"],
+                    "avg_rounds": s["avg_rounds_to_close"],
+                }
+                for i, s in enumerate(sellers_by_efficiency)
+            ],
+        },
+        "hallucination_summary": {
+            "total_floor_violations": len(hallucination_events),
+            "violating_sellers": list(set(h["seller"] for h in hallucination_events)),
+            "critical_events": hallucination_events,
+        },
+    }
+
     # Structured audit trail (Profit Map per deal)
     audit_trail = [
         {
-            "buyer":             d["buyer_name"],
-            "seller":            d["seller_name"],
-            "deal_price":        d["deal_price"],
-            "round":             d["round"],
-            "buyer_surplus":     d["buyer_surplus"],
-            "seller_surplus":    d["seller_surplus"],
-            "seller_profit":     d["seller_profit"],
+            "buyer": d["buyer_name"],
+            "seller": d["seller_name"],
+            "deal_price": d["deal_price"],
+            "round": d["round"],
+            "buyer_surplus": d["buyer_surplus"],
+            "seller_surplus": d["seller_surplus"],
+            "seller_profit": d["seller_profit"],
             "seller_margin_pct": d["seller_margin_pct"],
             "welfare_split_pct": d["welfare_split_pct"],
-            "buyer_score":       d["buyer_score_adj"],
-            "seller_score":      d["seller_score_adj"],
-            "global_score":      d["global_score"],
-            "pareto_optimal":    d["pareto_optimal"],
+            "buyer_score": d["buyer_score_adj"],
+            "seller_score": d["seller_score_adj"],
+            "global_score": d["global_score"],
+            "pareto_optimal": d["pareto_optimal"],
             "efficiency_penalty": d["efficiency_penalty"],
-            "contract_valid":    d["contract_valid"],
-            "seller_strategy":   d["seller_strategy"],
+            "contract_valid": d["contract_valid"],
+            "seller_tier": d["seller_tier"],
+            "hallucination_count": d["hallucination_count"],
         }
         for d in closed_deals
     ]
@@ -729,22 +1109,37 @@ async def run_market_3x3(
         possible=3,
         deal_rate=round(deal_rate, 3),
         # Scores (adjusted)
-        global_score=  round(avg_global,     3) if success else None,
-        buyer_score=   round(avg_buyer_adj,  3) if success else None,
-        seller_score=  round(avg_seller_adj, 3) if success else None,
+        global_score=round(avg_global, 3) if success else None,
+        buyer_score=round(avg_buyer_adj, 3) if success else None,
+        seller_score=round(avg_seller_adj, 3) if success else None,
         # Price
-        avg_deal_price=      round(avg_price,  2) if success else None,
-        avg_rounds_to_deal=  round(avg_rounds, 1) if success else None,
+        avg_deal_price=round(avg_price, 2) if success else None,
+        avg_rounds_to_deal=round(avg_rounds, 1) if success else None,
         # Welfare totals
-        total_buyer_surplus=  round(total_b_surplus) if success else None,
-        total_seller_surplus= round(total_s_surplus) if success else None,
-        total_market_surplus= round(total_surplus)   if success else None,
-        avg_welfare_split_pct=round(total_s_surplus / total_surplus * 100, 1) if success and total_surplus > 0 else None,
+        total_buyer_surplus=round(total_b_surplus) if success else None,
+        total_seller_surplus=round(total_s_surplus) if success else None,
+        total_market_surplus=round(total_surplus) if success else None,
+        avg_welfare_split_pct=(
+            round(total_s_surplus / total_surplus * 100, 1)
+            if success and total_surplus > 0
+            else None
+        ),
         # Pareto & contract
-        pareto_deals=       pareto_count,
+        pareto_deals=pareto_count,
+        pareto_deals_details=pareto_deals,
         contract_violations=contract_violations,
-        # Seller strategies (full log for audit)
-        seller_strategies={sid: seller_brains[sid].strategy_log for sid in SELLER_IDS},
+        # Seller comparison analytics
+        seller_comparison=seller_comparison,
+        superiority_verdict=superiority_verdict,
+        # Seller tier info (full state for audit)
+        seller_tiers={
+            sid: {
+                "tier": SELLER_CONFIGS[sid]["tier"],
+                "name": SELLER_CONFIGS[sid]["name"],
+                "final_meta": _seller_tier_meta(seller_brains[sid], sid),
+            }
+            for sid in SELLER_IDS
+        },
         # Audit trail
         audit_trail=audit_trail,
         deals=closed_deals,
