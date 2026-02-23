@@ -34,20 +34,13 @@ from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 
 from agenticpay_bridge import AgenticPayScoringEngine, ClaudeHaikuLLM
-from logic_engine import (
-    MARKET_AVERAGE_PRICE,
-    PURCHASER_PROFILES,
-    PROVIDER_FLOORS,
-    PROVIDER_ASKS,
-)
 
 _SCORING = AgenticPayScoringEngine()
 _SELLER_1_LLM = None  # Lazy-initialized ClaudeHaikuLLM for Tier 1 sellers
 
-# ── Constants (imported from logic_engine.py as source of truth) ──────────────
+# ── Constants ─────────────────────────────────────────────────────────────────
 
-# Market pricing from logic_engine.py
-MARKET_AVG_PRICE           = MARKET_AVERAGE_PRICE  # 150.0 USD
+MARKET_AVG_PRICE           = 150.0      # USD — Sneaker market reference
 MARKET_SWITCH_THRESHOLD    = 40.0       # buyer deprioritises seller if utility < this
 ACCEPT_SCORE_MIN           = 52.0       # buyer accepts if midpoint utility ≥ this
 PRICE_TOLERANCE            = 15.0       # $15 gap → deal closes automatically
@@ -89,17 +82,15 @@ BUYER_CONFIGS: Dict[str, Dict[str, Any]] = {
     },
 }
 
-# ── Seller profiles (from logic_engine.py PROVIDER_FLOORS/ASKS) ───────────────
+# ── Seller profiles (σ_j = private reservation / floor price) ─────────────────
 
-# Seller profiles (σ_j = private reservation / floor price)
-# Floors and asks imported from logic_engine.PROVIDER_FLOORS and PROVIDER_ASKS
 SELLER_CONFIGS: Dict[str, Dict[str, Any]] = {
     "automax": {
         "id":          "automax",
         "name":        "Nova Kicks",
         "tier":        1,
-        "floor":       PROVIDER_FLOORS["provider_1"],  # 110.0
-        "ask":         PROVIDER_ASKS["provider_1"],    # 180.0
+        "floor":       115.0,   # σ_j — private reservation price
+        "ask":         180.0,
         "speed_days":  7,
         "warranty_mo": 6,
         "concede_r":   0.20,
@@ -109,8 +100,8 @@ SELLER_CONFIGS: Dict[str, Dict[str, Any]] = {
         "id":          "quickwheels",
         "name":        "QuickShoe",
         "tier":        3,
-        "floor":       PROVIDER_FLOORS["provider_3"],  # 105.0
-        "ask":         PROVIDER_ASKS["provider_3"],    # 165.0
+        "floor":       105.0,
+        "ask":         165.0,
         "speed_days":  2,
         "warranty_mo": 3,
         "concede_r":   0.25,
@@ -120,8 +111,8 @@ SELLER_CONFIGS: Dict[str, Dict[str, Any]] = {
         "id":          "luxdrive",
         "name":        "SoleMaster",
         "tier":        2,
-        "floor":       PROVIDER_FLOORS["provider_2"],  # 125.0
-        "ask":         PROVIDER_ASKS["provider_2"],    # 200.0
+        "floor":       125.0,
+        "ask":         200.0,
         "speed_days":  14,
         "warranty_mo": 18,
         "concede_r":   0.12,
