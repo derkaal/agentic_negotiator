@@ -216,7 +216,7 @@ export default function ControlBar({
           <button
             onClick={() => onStart(
               purchaserType, mode,
-              isMarket ? { scenario: 'used_car' } : undefined,
+              isMarket ? { scenario: 'sneaker' } : undefined,
             )}
             disabled={isRunning}
             className={clsx(

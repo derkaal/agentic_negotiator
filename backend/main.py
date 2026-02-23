@@ -931,7 +931,7 @@ async def websocket_market(websocket: WebSocket, scenario: str = "used_car"):
         await websocket.close()
         return
 
-    supported = {"used_car"}
+    supported = {"used_car", "sneaker"}
     if scenario not in supported:
         await websocket.send_text(json.dumps({
             "type": "error",

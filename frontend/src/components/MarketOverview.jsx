@@ -538,7 +538,9 @@ export default function MarketOverview({
 
   // Use auditTrail if available (post-market), else live closedDeals
   const profitMapData = auditTrail.length > 0 ? auditTrail : closedDeals
-  const scenarioLabel = scenario === 'used_car' ? '🚗 Used Car Market — Honda Civic 2021' : scenario
+  const scenarioLabel = scenario === 'used_car' ? '🚗 Used Car Market — Honda Civic 2021' :
+                        scenario === 'sneaker' ? '👟 Sneaker Market — Limited Edition Sneakers' :
+                        scenario
 
   return (
     <div className="space-y-5">

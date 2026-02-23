@@ -360,7 +360,9 @@ export default function App() {
                 🏪 MBMPMS · 3 Buyers × 3 Sellers
               </span>
               <span className="text-xs text-war-muted font-mono">
-                {marketScenario === 'used_car' ? 'Honda Civic 2021 · Used Car Market' : marketScenario}
+                {marketScenario === 'used_car' ? 'Honda Civic 2021 · Used Car Market' :
+                 marketScenario === 'sneaker' ? 'Limited Edition Sneakers · Sneaker Market' :
+                 marketScenario}
               </span>
               <span className="text-[10px] text-war-muted/60 font-mono">
                 Parallel Interaction · Market Switch &lt;40 · AgenticPay Algorithm 1
