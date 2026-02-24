@@ -1,12 +1,13 @@
 """
-Integration test for stress test scenarios.
+Integration test for stress test scenarios with statistical analysis.
 
 Tests the complete flow:
 1. Load configuration
 2. Register scenario
-3. Run scenario
+3. Run scenario 30 times (N=30 per tier)
 4. Collect metrics
-5. Analyze tier performance
+5. Perform statistical analysis
+6. Generate report
 """
 
 import asyncio
@@ -21,12 +22,15 @@ from stress_scenarios.config_loader import load_config
 from stress_scenarios.scenarios.adversarial_buyer import (
     AdversarialBuyerScenario
 )
+from stress_scenarios.statistical_analysis import (
+    generate_statistical_report
+)
 
 
 async def test_adversarial_buyer_scenario():
-    """Test Scenario 1: Adversarial Buyer."""
+    """Test Scenario 1: Adversarial Buyer with Statistical Analysis."""
     print("=" * 70)
-    print("STRESS TEST: Adversarial Buyer Scenario")
+    print("STRESS TEST: Adversarial Buyer Scenario (N=30)")
     print("=" * 70)
     print()
     
@@ -47,162 +51,87 @@ async def test_adversarial_buyer_scenario():
         print(f"   Description: {config.description.strip()}")
         print(f"   Max rounds: {config.max_rounds}")
         print(f"   Market avg: ${config.market_avg}")
+        num_iterations = getattr(config, 'num_iterations', 30)
+        print(f"   Iterations: {num_iterations}")
         print()
     except FileNotFoundError as e:
         print(f"   ERROR: {e}")
         print("   Make sure adversarial_buyer.yaml exists in configs/")
         return False
     
-    # Run scenario
-    print("3. Running scenario...")
-    print("   (This will take a moment as it runs the market simulation)")
+    # Collect results from multiple iterations
+    print(f"3. Running {num_iterations} iterations...")
+    print("   (This will take several minutes)")
     print()
     
+    tier1_scores = []
+    tier2_scores = []
+    tier3_scores = []
+    
     try:
-        result = await runner.run_scenario("adversarial_buyer", config)
-        
-        print("4. Scenario completed!")
-        print(f"   Success: {result.success}")
-        print(f"   Phase: {result.phase.value}")
-        print(f"   Duration: {result.duration_seconds:.2f}s")
-        print()
-        
-        # Display metrics
-        print("5. Metrics collected:")
-        for metric_name, value in result.metrics.items():
-            print(f"   - {metric_name}: {value}")
-        print()
-        
-        # Display tier performance with multi-dimensional metrics
-        print("6. Multi-Dimensional Tier Performance:")
-        print()
-        
-        for tier in [1, 2, 3]:
-            performance = result.tier_performance.get(tier, {})
-            if not performance:
-                continue
+        for i in range(num_iterations):
+            result = await runner.run_scenario("adversarial_buyer", config)
             
-            tier_names = {
-                1: "Solo LLM",
-                2: "Math Geek",
-                3: "Probing Strategist"
-            }
+            # Extract composite scores
+            t1_score = result.tier_performance.get(1, {}).get(
+                "composite_score", 0
+            )
+            t2_score = result.tier_performance.get(2, {}).get(
+                "composite_score", 0
+            )
+            t3_score = result.tier_performance.get(3, {}).get(
+                "composite_score", 0
+            )
             
-            print(f"   Tier {tier} ({tier_names[tier]}):")
-            print(f"     Deal Count: {performance.get('deal_count', 0)}")
-            print(f"     Absolute Price: ${performance.get('absolute_price', 0):.2f}")
-            print(f"     Absolute Rank: {performance.get('absolute_rank', 'N/A')}")
-            print()
-            print(f"     📊 Performance Metrics:")
-            print(f"       • Relative Price Achievement: "
-                  f"{performance.get('relative_price_achievement', 0):.2f}%")
-            print(f"       • Market-Relative Performance: "
-                  f"{performance.get('market_relative_performance', 0):.2f}%")
-            print(f"       • Efficiency Score: "
-                  f"{performance.get('efficiency_score', 0):.2f}%")
-            print(f"       • Composite Score: "
-                  f"{performance.get('composite_score', 0):.2f}%")
-            print()
+            tier1_scores.append(t1_score)
+            tier2_scores.append(t2_score)
+            tier3_scores.append(t3_score)
+            
+            print(f"   Iteration {i+1}/{num_iterations}: "
+                  f"T1={t1_score:.2f}%, T2={t2_score:.2f}%, "
+                  f"T3={t3_score:.2f}%")
         
-        # Analyze results with new metrics
-        print("7. Fair Comparison Analysis:")
+        print()
+        print("4. All iterations completed!")
         print()
         
-        # Extract composite scores for comparison
-        tier_1_composite = result.tier_performance.get(1, {}).get(
-            "composite_score", None
-        )
-        tier_2_composite = result.tier_performance.get(2, {}).get(
-            "composite_score", None
-        )
-        tier_3_composite = result.tier_performance.get(3, {}).get(
-            "composite_score", None
+        # Generate statistical report
+        print("5. Generating statistical analysis...")
+        report = generate_statistical_report(
+            tier1_scores,
+            tier2_scores,
+            tier3_scores
         )
         
-        # Extract market-relative performance
-        tier_1_market = result.tier_performance.get(1, {}).get(
-            "market_relative_performance", None
-        )
-        tier_2_market = result.tier_performance.get(2, {}).get(
-            "market_relative_performance", None
-        )
-        tier_3_market = result.tier_performance.get(3, {}).get(
-            "market_relative_performance", None
-        )
+        print(report)
         
-        # Extract absolute prices
-        tier_1_price = result.tier_performance.get(1, {}).get(
-            "absolute_price", None
-        )
-        tier_2_price = result.tier_performance.get(2, {}).get(
-            "absolute_price", None
-        )
-        tier_3_price = result.tier_performance.get(3, {}).get(
-            "absolute_price", None
-        )
+        # Save report to file
+        report_path = Path(__file__).parent.parent / \
+            "STATISTICAL_ANALYSIS_REPORT.md"
+        with open(report_path, "w", encoding="utf-8") as f:
+            f.write(report)
         
-        print("   Floor-Agnostic Metrics (Fair Comparison):")
-        if tier_1_market is not None:
-            print(f"   • Tier 1 Market-Relative: {tier_1_market:.2f}%")
-        if tier_2_market is not None:
-            print(f"   • Tier 2 Market-Relative: {tier_2_market:.2f}%")
-        if tier_3_market is not None:
-            print(f"   • Tier 3 Market-Relative: {tier_3_market:.2f}%")
+        print()
+        print(f"6. Report saved to: {report_path}")
         print()
         
-        print("   Absolute Price Comparison:")
-        if tier_1_price is not None:
-            print(f"   • Tier 1: ${tier_1_price:.2f}")
-        if tier_2_price is not None:
-            print(f"   • Tier 2: ${tier_2_price:.2f}")
-        if tier_3_price is not None:
-            print(f"   • Tier 3: ${tier_3_price:.2f}")
+        # Quick summary
+        print("=" * 70)
+        print("SUMMARY")
+        print("=" * 70)
+        print(f"Tier 1 (Solo LLM):        Mean = {sum(tier1_scores)/len(tier1_scores):.2f}%")
+        print(f"Tier 2 (Math Geek):       Mean = {sum(tier2_scores)/len(tier2_scores):.2f}%")
+        print(f"Tier 3 (Probing):         Mean = {sum(tier3_scores)/len(tier3_scores):.2f}%")
         print()
         
-        print("   Composite Scores (Weighted Multi-Metric):")
-        if tier_1_composite is not None:
-            print(f"   • Tier 1 (Solo LLM): {tier_1_composite:.2f}%")
-        if tier_2_composite is not None:
-            print(f"   • Tier 2 (Math Geek): {tier_2_composite:.2f}%")
-        if tier_3_composite is not None:
-            print(f"   • Tier 3 (Probing Strategist): {tier_3_composite:.2f}%")
-        print()
-        
-        # Validation checks
-        print("   Validation:")
-        all_valid = True
-        
-        # Check that Tier 2 is not unfairly penalized
-        if tier_2_composite is not None and tier_2_market is not None:
-            if tier_2_composite > 0:
-                print("   ✓ Tier 2 has positive composite score "
-                      "(no longer unfairly penalized)")
-            else:
-                print("   ⚠ Tier 2 composite score is zero or negative")
-                all_valid = False
-        
-        # Check that metrics are diverse
-        if (tier_1_composite is not None and tier_2_composite is not None
-            and tier_3_composite is not None):
-            scores = [tier_1_composite, tier_2_composite, tier_3_composite]
-            if max(scores) - min(scores) > 10:
-                print("   ✓ Composite scores show meaningful differentiation")
-            else:
-                print("   ⚠ Composite scores are too similar")
-        
-        # Check absolute price ranking makes sense
-        tier_1_rank = result.tier_performance.get(1, {}).get("absolute_rank")
-        tier_2_rank = result.tier_performance.get(2, {}).get("absolute_rank")
-        tier_3_rank = result.tier_performance.get(3, {}).get("absolute_rank")
-        
-        if all(r is not None for r in [tier_1_rank, tier_2_rank, tier_3_rank]):
-            print(f"   ✓ Absolute rankings assigned: "
-                  f"T1={tier_1_rank}, T2={tier_2_rank}, T3={tier_3_rank}")
-        
-        if not all_valid:
-            print()
-            print("   ⚠ Some validation checks failed")
-        
+        # Determine best performer
+        means = {
+            "Tier 1 (Solo LLM)": sum(tier1_scores)/len(tier1_scores),
+            "Tier 2 (Math Geek)": sum(tier2_scores)/len(tier2_scores),
+            "Tier 3 (Probing)": sum(tier3_scores)/len(tier3_scores),
+        }
+        best = max(means, key=means.get)
+        print(f"Best Performer: {best} ({means[best]:.2f}%)")
         print()
         print("=" * 70)
         print("TEST COMPLETED SUCCESSFULLY")
@@ -218,7 +147,7 @@ async def test_adversarial_buyer_scenario():
 
 
 async def main():
-    """Run integration tests."""
+    """Run integration tests with statistical analysis."""
     success = await test_adversarial_buyer_scenario()
     
     if success:

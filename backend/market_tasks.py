@@ -174,26 +174,55 @@ def calculate_optimal_guess(
     current_round: int,
     buyer_last_offer: float,
     seller_floor: float,
-    max_rounds: int = 10,
+    seller_initial_ask: float,
+    max_rounds: int = 5,
+    beta: float = 2.0,
 ) -> Dict[str, Any]:
     """
-    External tool: Calculate optimal seller counter-offer.
-    Returns full trace for narrator transparency.
+    Anchor-Resistant Boulware Strategy (Time-Dependent Tactic)
+    
+    Formula: P_t = Ask - (Ask - Floor) × (t / t_max)^β
+    
+    Parameters:
+    - β = 2.0 (Boulware curve - concedes slowly at first, faster near deadline)
+    - t_max = 5 (maximum rounds for concession calculation)
+    
+    Safety Logic:
+    1. Calculate P_t based ONLY on seller's initial_ask, floor, and current_round
+    2. If buyer_last_offer > P_t, return buyer_last_offer (accept better offer)
+    3. Never return value below floor_price
+    
+    This formula is IMMUNE to buyer anchoring because it ignores buyer's offer
+    in the calculation, only checking if buyer's offer is better than our target.
     """
     t = min(current_round, max_rounds)
-    convergence_factor = 0.5 + 0.5 * (t / max_rounds)
-    convergence_pct = round(convergence_factor * 100, 1)
-    raw_price = convergence_factor * buyer_last_offer
-    floor_clamped = raw_price < seller_floor
-    optimal_price = round(max(raw_price, seller_floor))
-
+    
+    # Boulware concession curve: (t / t_max)^β
+    concession_factor = (t / max_rounds) ** beta
+    
+    # Calculate target price based on seller's position only
+    price_range = seller_initial_ask - seller_floor
+    concession_amount = price_range * concession_factor
+    calculated_price = seller_initial_ask - concession_amount
+    
+    # Safety: Never go below floor
+    calculated_price = max(calculated_price, seller_floor)
+    
+    # Opponent check: If buyer offers more, take it
+    if buyer_last_offer > calculated_price:
+        optimal_price = buyer_last_offer
+        rationale = f"Accepting buyer's superior offer of ${buyer_last_offer:.2f}"
+    else:
+        optimal_price = calculated_price
+        rationale = f"Boulware strategy: round {t}/{max_rounds}, β={beta}"
+    
     return {
-        "formula": "P = (0.5 + 0.5 × t/tₘ) × B",
-        "convergence_factor": round(convergence_factor, 3),
-        "convergence_pct": convergence_pct,
-        "raw_price": round(raw_price),
-        "floor_clamped": floor_clamped,
-        "optimal_price": optimal_price,
+        "optimal_price": round(optimal_price, 2),
+        "rationale": rationale,
+        "concession_factor": round(concession_factor, 4),
+        "calculated_price": round(calculated_price, 2),
+        "buyer_offer": buyer_last_offer,
+        "formula": f"P_t = {seller_initial_ask} - ({seller_initial_ask} - {seller_floor}) × ({t}/{max_rounds})^{beta}",
     }
 
 
@@ -544,7 +573,7 @@ def _math_cyborg_ask(
 ) -> Tuple[float, Optional[Dict[str, Any]]]:
     """
     Tier 2: Calculated Math Geek (SoleMaster).
-    Uses calculate_optimal_guess tool. LLM acts only as narrator.
+    Uses Anchor-Resistant Boulware Strategy. LLM acts only as narrator.
     Returns: (price, None) — no hallucinations
     """
     s = SELLER_CONFIGS[seller_id]
@@ -556,7 +585,9 @@ def _math_cyborg_ask(
         current_round=rnd,
         buyer_last_offer=pair.buyer_offer,
         seller_floor=s["floor"],
-        max_rounds=10,
+        seller_initial_ask=s["ask"],
+        max_rounds=5,
+        beta=2.0,
     )
     
     brain.last_tool_call = tool_result
@@ -572,7 +603,7 @@ def _probing_strategist_ask(
 ) -> Tuple[float, Optional[Dict[str, Any]]]:
     """
     Tier 3: Probing Strategist (QuickShoe).
-    Extends Tier 2 with diagnostic questions and probe-adjusted convergence.
+    Uses Anchor-Resistant Boulware Strategy + diagnostic questions.
     Returns: (price, None) — no hallucinations
     """
     s = SELLER_CONFIGS[seller_id]
@@ -580,32 +611,26 @@ def _probing_strategist_ask(
     if rnd == 1:
         return s["ask"], None
     
-    # Check for scheduled diagnostic question
+    # Step 1: Select diagnostic question
     probe = _select_diagnostic_question(rnd)
     if probe:
         answer = _simulate_buyer_response(probe, buyer_id)
         brain.info_gained[probe] = answer
         brain.last_probe = probe
     
-    # Probe-adjusted convergence
-    max_rounds = 10
-    effective_round = rnd
-    
-    # If price confirmed as dominant, compress convergence
-    if any("price" in k.lower() for k in brain.info_gained.keys()):
-        for ans in brain.info_gained.values():
-            if "price" in ans.lower():
-                effective_round = min(rnd + 2, max_rounds)
-                break
-    
+    # Step 2: Calculate optimal price using Boulware strategy
     tool_result = calculate_optimal_guess(
-        current_round=effective_round,
+        current_round=rnd,
         buyer_last_offer=pair.buyer_offer,
         seller_floor=s["floor"],
-        max_rounds=max_rounds,
+        seller_initial_ask=s["ask"],
+        max_rounds=5,
+        beta=2.0,
     )
     
+    # Step 3: Update brain state
     brain.last_tool_call = tool_result
+    
     return tool_result["optimal_price"], None
 
 
@@ -645,10 +670,9 @@ def _seller_tier_meta(brain: SellerBrain, seller_id: str) -> str:
         if brain.last_tool_call:
             t = brain.last_tool_call
             return (
-                f"Tool: {t['formula']} → "
-                f"{t['convergence_pct']}% convergence → "
-                f"${t['optimal_price']:,.0f}"
-                f"{' (floor clamped)' if t['floor_clamped'] else ''}"
+                f"Boulware Strategy: {t['rationale']} → "
+                f"${t['optimal_price']:,.0f} "
+                f"(concession: {t['concession_factor']:.2%})"
             )
         return "Awaiting tool calculation"
     
@@ -657,7 +681,8 @@ def _seller_tier_meta(brain: SellerBrain, seller_id: str) -> str:
         if brain.last_tool_call:
             t = brain.last_tool_call
             parts.append(
-                f"Tool: {t['convergence_pct']}% → ${t['optimal_price']:,.0f}"
+                f"Boulware: ${t['optimal_price']:,.0f} "
+                f"({t['concession_factor']:.2%})"
             )
         if brain.last_probe:
             parts.append(f"Probe: {brain.last_probe}")
