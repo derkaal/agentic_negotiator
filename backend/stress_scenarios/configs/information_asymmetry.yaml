@@ -1,0 +1,50 @@
+# Information Asymmetry Scenario Configuration
+# Tests seller performance when buyers have hidden information
+
+scenario_id: information_asymmetry
+name: "Information Asymmetry"
+description: "Test seller performance when buyers have hidden information"
+enabled: true
+max_rounds: 10
+num_iterations: 30  # N=30 for statistical rigor
+market_avg: 100.0  # Base market average price
+
+parameters:
+  # Probability of each asymmetry type being present
+  asymmetry_probability:
+    urgency: 0.5      # 50% chance buyer has hidden deadline
+    budget: 0.5       # 50% chance buyer has hidden budget headroom
+    alternatives: 0.3 # 30% chance buyer misrepresents alternatives
+    quality: 0.3      # 30% chance buyer hides quality preferences
+  
+  # Hidden urgency configuration
+  urgency_config:
+    deadline_range: [3, 7]        # Deadline between rounds 3-7
+    premium_range: [0.05, 0.15]   # 5-15% price premium near deadline
+  
+  # Hidden budget configuration
+  budget_config:
+    gap_range: [0.05, 0.15]       # 5-15% hidden budget above claimed max
+  
+  # Disclosure probability when directly asked
+  disclosure_probability: 0.7     # 70% chance buyer reveals if probed
+  
+  # Expected performance thresholds (for validation)
+  expected_thresholds:
+    # Tier 1 (Solo LLM): Limited extraction ability
+    tier_1_extraction: [20, 30]   # 20-30% extraction rate
+    tier_1_premium: [2, 5]        # 2-5% premium captured
+    
+    # Tier 2 (Math Geek): Minimal extraction (focuses on math)
+    tier_2_extraction: [0, 10]    # 0-10% extraction rate
+    tier_2_premium: [0, 3]        # 0-3% premium captured
+    
+    # Tier 3 (Probing Strategist): High extraction ability
+    tier_3_extraction: [70, 85]   # 70-85% extraction rate
+    tier_3_premium: [10, 20]      # 10-20% premium captured
+  
+  # Scoring weights for composite score
+  scoring_weights:
+    extraction_rate: 0.4    # 40% weight
+    premium_captured: 0.3   # 30% weight
+    closure_rate: 0.3       # 30% weight

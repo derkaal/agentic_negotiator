@@ -122,7 +122,9 @@ async def stress_test_websocket(websocket: WebSocket, scenario_id: str):
     WebSocket endpoint for running stress test scenarios.
     
     Args:
-        scenario_id: Scenario identifier (e.g., "adversarial_buyer")
+        scenario_id: Scenario identifier
+            - "adversarial_buyer": Scenario 1
+            - "information_asymmetry": Scenario 2
     """
     await websocket.accept()
     log.info("Stress test WS connected (scenario=%s)", scenario_id)
@@ -133,10 +135,17 @@ async def stress_test_websocket(websocket: WebSocket, scenario_id: str):
         from stress_scenarios.scenarios.adversarial_buyer import (
             AdversarialBuyerScenario
         )
+        from stress_scenarios.scenarios.information_asymmetry import (
+            InformationAsymmetryScenario
+        )
         
-        # Register scenario
+        # Register scenarios
         runner = get_runner()
         runner.register_scenario("adversarial_buyer", AdversarialBuyerScenario)
+        runner.register_scenario(
+            "information_asymmetry",
+            InformationAsymmetryScenario
+        )
         
         # Load config
         try:
