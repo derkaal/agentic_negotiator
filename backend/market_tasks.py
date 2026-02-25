@@ -693,6 +693,19 @@ def _seller_tier_meta(brain: SellerBrain, seller_id: str) -> str:
     return "Unknown tier"
 
 
+def _get_tier_from_seller_id(seller_id: str) -> int:
+    """
+    Map seller_id to tier number for Scenario 2 integration.
+    
+    Args:
+        seller_id: Seller identifier
+        
+    Returns:
+        Tier number (1, 2, or 3)
+    """
+    return SELLER_CONFIGS.get(seller_id, {}).get("tier", 0)
+
+
 # ── Event helper ──────────────────────────────────────────────────────────────
 
 def _ev(t: str, **kw) -> Dict[str, Any]:
@@ -835,6 +848,23 @@ async def run_market_3x3(
             # Track hallucination events
             if hallucination_event:
                 pair.hallucination_log.append(hallucination_event)
+
+            # Emit seller message event for Scenario 2 integration
+            # Include probe question if available (Tier 3)
+            seller_message = _seller_tier_meta(brain, sid)
+            if brain.last_probe:
+                seller_message = f"{brain.last_probe} | {seller_message}"
+            
+            yield _ev(
+                "seller_message",
+                seller_id=sid,
+                seller_tier=_get_tier_from_seller_id(sid),
+                buyer_id=bid,
+                message=seller_message,
+                round=rnd,
+                current_ask=pair.seller_ask,
+                current_offer=pair.buyer_offer,
+            )
 
             # Utilities
             switch_utility   = _pair_utility(bid, sid, pair.seller_ask, market_avg)

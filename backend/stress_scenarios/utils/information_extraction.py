@@ -48,7 +48,10 @@ class ProbeDetector:
             r"\bspend\b",
             r"\bprice.*range\b",
             r"\bflexib.*budget\b",
-            r"\btop.*dollar\b"
+            r"\btop.*dollar\b",
+            r"\bprice.*ceiling\b",
+            r"\bhard.*price\b",
+            r"\bceiling\b"
         ],
         "alternatives": [
             r"\bother.*offers?\b",
@@ -58,7 +61,9 @@ class ProbeDetector:
             r"\bcomparing\b",
             r"\bother.*sellers?\b",
             r"\bbest.*offers?\b",
-            r"\bproof\b"
+            r"\bproof\b",
+            r"\breject.*offer\b",
+            r"\bwhy.*reject\b"
         ],
         "quality": [
             r"\bpriority\b",
@@ -68,7 +73,12 @@ class ProbeDetector:
             r"\bvalue.*most\b",
             r"\bcare.*about\b",
             r"\bmatter.*most\b",
-            r"\bfeature.*need\b"
+            r"\bfeature.*need\b",
+            r"\bmore important\b",
+            r"\bimportant.*speed\b",
+            r"\bimportant.*price\b",
+            r"\bimportant.*warranty\b",
+            r"\bwarranty.*length\b"
         ]
     }
     
