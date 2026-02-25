@@ -20,7 +20,8 @@ from langchain_core.tools import tool
 # Constants
 # ---------------------------------------------------------------------------
 
-MARKET_AVG_PRICE = 150.0  # USD per pair
+MARKET_AVG_PRICE = 150.0        # USD per pair
+MARKET_AVERAGE_PRICE = MARKET_AVG_PRICE  # alias for compatibility
 
 PURCHASER_PROFILES = {
     "tough": {
