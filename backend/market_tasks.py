@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
@@ -260,6 +261,44 @@ def _simulate_buyer_response(
     return "I'm evaluating all factors."
 
 
+# ── Fraud Shield: Verification Oracle ────────────────────────────────────────
+
+_PHANTOM_THRESHOLD = MARKET_AVG_PRICE * 0.85  # ≈ $127.50 (85 % of $150)
+
+def _verification_oracle(buyer_message: str) -> Dict[str, Any]:
+    """
+    Scan a buyer message for price claims and flag deceptive anchors.
+
+    A "Phantom Alternative" is any claimed price below 85 % of the market
+    average (~$127.50). Buyers who cite such prices are fabricating cheaper
+    alternatives to extract concessions; the Fraud Shield penalises them by
+    pulling back the Boulware concession one round.
+
+    Returns
+    -------
+    {
+        "is_deceptive":  bool,
+        "claimed_price": float | None,   # first price found, or None
+    }
+    """
+    matches = re.findall(r"\$?\s*([\d,]+(?:\.\d{1,2})?)", buyer_message)
+    claimed_price: Optional[float] = None
+    for raw in matches:
+        try:
+            value = float(raw.replace(",", ""))
+        except ValueError:
+            continue
+        # Ignore implausibly small numbers (quantities, days, months…)
+        if value >= 50.0:
+            claimed_price = value
+            break  # use first plausible price claim
+
+    is_deceptive = (
+        claimed_price is not None and claimed_price < _PHANTOM_THRESHOLD
+    )
+    return {"is_deceptive": is_deceptive, "claimed_price": claimed_price}
+
+
 # ── Buyer-side utility (unchanged from v1) ────────────────────────────────────
 
 def _pair_utility(buyer_id: str, seller_id: str, price: float, market_avg: Optional[float] = None) -> float:
@@ -314,6 +353,9 @@ class SellerBrain:
     # Tier 3 only: diagnostic probing
     info_gained: Dict[str, str] = field(default_factory=dict)
     last_probe: Optional[str] = None
+    # Tier 3 only: Fraud Shield state
+    fraud_shield_triggered: bool = False
+    fraud_claimed_price: Optional[float] = None
 
 
 # ── PairState (updated with seller fields) ────────────────────────────────────
@@ -611,16 +653,26 @@ def _probing_strategist_ask(
     if rnd == 1:
         return s["ask"], None
     
-    # Step 1: Select diagnostic question
+    # Step 1: Select diagnostic question and probe the buyer
     probe = _select_diagnostic_question(rnd)
     if probe:
         answer = _simulate_buyer_response(probe, buyer_id)
         brain.info_gained[probe] = answer
         brain.last_probe = probe
 
-    # Step 1.5: If buyer revealed price is dominant, accelerate convergence
-    price_dominant = (brain.info_gained.get("speed or price") == "price")
-    effective_rnd = min(rnd + 2, 5) if price_dominant else rnd
+    # Step 1.5: Fraud Shield — run every probed answer through the oracle
+    effective_rnd = rnd
+    if probe and brain.info_gained.get(probe):
+        oracle = _verification_oracle(brain.info_gained[probe])
+        if oracle["is_deceptive"]:
+            # Phantom Alternative detected: retract one round of concession
+            effective_rnd = max(1, rnd - 1)
+            brain.fraud_shield_triggered = True
+            brain.fraud_claimed_price = oracle["claimed_price"]
+        else:
+            # Honest answer: reset shield so it doesn't persist from prior rounds
+            brain.fraud_shield_triggered = False
+            brain.fraud_claimed_price = None
 
     # Step 2: Calculate optimal price using Boulware strategy
     tool_result = calculate_optimal_guess(
@@ -682,6 +734,11 @@ def _seller_tier_meta(brain: SellerBrain, seller_id: str) -> str:
     
     elif tier == 3:
         parts = []
+        if brain.fraud_shield_triggered and brain.fraud_claimed_price is not None:
+            parts.append(
+                f"Fraud Shield ACTIVE - Penalizing deceptive claim of "
+                f"${brain.fraud_claimed_price:,.2f}"
+            )
         if brain.last_tool_call:
             t = brain.last_tool_call
             parts.append(
