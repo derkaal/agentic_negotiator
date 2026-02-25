@@ -20,7 +20,8 @@ from langchain_core.tools import tool
 # Constants
 # ---------------------------------------------------------------------------
 
-MARKET_AVERAGE_PRICE = 150.0  # USD per pair
+MARKET_AVG_PRICE = 150.0        # USD per pair
+MARKET_AVERAGE_PRICE = MARKET_AVG_PRICE  # alias for compatibility
 
 PURCHASER_PROFILES = {
     "tough": {
@@ -52,15 +53,22 @@ PROVIDER_ASKS = {
 # Helper: normalise raw deal dimensions to [0, 1]
 # ---------------------------------------------------------------------------
 
-def _normalise(price: float, speed_days: int, warranty_months: int) -> dict:
+def _normalise(
+    price: float,
+    speed_days: int,
+    warranty_months: int,
+    market_avg: float = MARKET_AVG_PRICE,
+) -> dict:
     """
     Convert raw deal values into [0, 1] utility sub-scores.
 
     Price:    lower is better.  Anchored around market average ±50 %.
     Speed:    lower (faster) is better.  Range 1–30 days.
     Warranty: higher is better.  Range 0–24 months.
+
+    market_avg: override the static baseline (e.g. from Round 0 Market Discovery).
     """
-    min_price, max_price = MARKET_AVERAGE_PRICE * 0.5, MARKET_AVERAGE_PRICE * 1.5
+    min_price, max_price = market_avg * 0.5, market_avg * 1.5
     price_score = max(0.0, min(1.0, (max_price - price) / (max_price - min_price)))
 
     min_speed, max_speed = 1, 30
@@ -82,6 +90,7 @@ def utility_calculator(
     speed_days: int,
     warranty_months: int,
     purchaser_type: Literal["tough", "emergency"] = "tough",
+    market_avg: float = MARKET_AVG_PRICE,
 ) -> dict:
     """
     Calculate a 0–100 utility score for a proposed deal.
@@ -98,10 +107,14 @@ def utility_calculator(
         speed_days:      Promised delivery speed in days.
         warranty_months: Warranty length in months.
         purchaser_type:  'tough' or 'emergency'.
+        market_avg:      Real-time market average from Round 0 Market Discovery.
+                         Defaults to the static baseline ($150). Pass the actual
+                         market average to override the static baseline so that
+                         all price normalisation reflects live market data.
     """
     profile = PURCHASER_PROFILES[purchaser_type]
     w = profile["weights"]
-    norms = _normalise(price, speed_days, warranty_months)
+    norms = _normalise(price, speed_days, warranty_months, market_avg)
 
     overall = (
         w["price"] * norms["price"]
@@ -176,15 +189,15 @@ def price_oracle(quantity: int = 10) -> dict:
     Args:
         quantity: Number of pairs being purchased (for context only).
     """
-    total_market_value = MARKET_AVERAGE_PRICE * quantity
+    total_market_value = MARKET_AVG_PRICE * quantity
     return {
         "item": "Limited Edition Sneakers",
         "quantity": quantity,
-        "market_average_per_pair": MARKET_AVERAGE_PRICE,
+        "market_average_per_pair": MARKET_AVG_PRICE,
         "total_market_value": round(total_market_value, 2),
         "fair_range": {
-            "low": round(MARKET_AVERAGE_PRICE * 0.90, 2),
-            "high": round(MARKET_AVERAGE_PRICE * 1.10, 2),
+            "low": round(MARKET_AVG_PRICE * 0.90, 2),
+            "high": round(MARKET_AVG_PRICE * 1.10, 2),
         },
         "note": (
             "Any offer more than 10 % above market average should be "
@@ -318,8 +331,8 @@ def market_oracle(
         seller_stock_claim: How many units the seller claims to have (-1 = not stated).
         seller_id:          Seller identifier for stock cross-check.
     """
-    upper_bound   = round(MARKET_AVERAGE_PRICE * 1.05, 2)
-    pct_above_mkt = round(((price - MARKET_AVERAGE_PRICE) / MARKET_AVERAGE_PRICE) * 100, 2)
+    upper_bound   = round(MARKET_AVG_PRICE * 1.05, 2)
+    pct_above_mkt = round(((price - MARKET_AVG_PRICE) / MARKET_AVG_PRICE) * 100, 2)
 
     warnings: list[dict] = []
 
@@ -343,7 +356,7 @@ def market_oracle(
         return {
             "status":         "OVERPRICED",
             "price":          price,
-            "market_average": MARKET_AVERAGE_PRICE,
+            "market_average": MARKET_AVG_PRICE,
             "upper_bound":    upper_bound,
             "pct_above_mkt":  pct_above_mkt,
             "warnings":       warnings,
@@ -356,7 +369,7 @@ def market_oracle(
     return {
         "status":         "APPROVED",
         "price":          price,
-        "market_average": MARKET_AVERAGE_PRICE,
+        "market_average": MARKET_AVG_PRICE,
         "upper_bound":    upper_bound,
         "pct_above_mkt":  pct_above_mkt,
         "warnings":       warnings,

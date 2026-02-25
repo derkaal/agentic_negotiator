@@ -617,10 +617,14 @@ def _probing_strategist_ask(
         answer = _simulate_buyer_response(probe, buyer_id)
         brain.info_gained[probe] = answer
         brain.last_probe = probe
-    
+
+    # Step 1.5: If buyer revealed price is dominant, accelerate convergence
+    price_dominant = (brain.info_gained.get("speed or price") == "price")
+    effective_rnd = min(rnd + 2, 5) if price_dominant else rnd
+
     # Step 2: Calculate optimal price using Boulware strategy
     tool_result = calculate_optimal_guess(
-        current_round=rnd,
+        current_round=effective_rnd,
         buyer_last_offer=pair.buyer_offer,
         seller_floor=s["floor"],
         seller_initial_ask=s["ask"],
